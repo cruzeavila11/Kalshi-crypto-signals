@@ -237,34 +237,36 @@ app.get("/api/discover-series", async (req, res) => {
       : [];
 
     const matches = series
-      .filter((item) => {
-        const text = [
-          item.ticker,
-          item.title,
-          item.category,
-          ...(Array.isArray(item.tags) ? item.tags : [])
-        ]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase();
+  .filter((item) => {
+    const ticker = String(item.ticker || "").toUpperCase();
+    const category = String(item.category || "").toLowerCase();
+    const tags = Array.isArray(item.tags)
+      ? item.tags.map((tag) => String(tag).toUpperCase())
+      : [];
 
-        return (
-          text.includes("bitcoin") ||
-          text.includes("ethereum") ||
-          text.includes("solana") ||
-          /\bbtc\b/.test(text) ||
-          /\beth\b/.test(text) ||
-          /\bsol\b/.test(text)
-        );
-      })
-      .map((item) => ({
-        ticker: item.ticker ?? null,
-        title: item.title ?? null,
-        category: item.category ?? null,
-        tags: item.tags ?? null,
-        frequency: item.frequency ?? null
-      }));
+    const isCryptoCategory = category === "crypto";
 
+    const isBTC =
+      tags.includes("BTC") ||
+      ticker.startsWith("KXBTC");
+
+    const isETH =
+      tags.includes("ETH") ||
+      ticker.startsWith("KXETH");
+
+    const isSOL =
+      tags.includes("SOL") ||
+      ticker.startsWith("KXSOL");
+
+    return isCryptoCategory && (isBTC || isETH || isSOL);
+  })
+  .map((item) => ({
+    ticker: item.ticker ?? null,
+    title: item.title ?? null,
+    category: item.category ?? null,
+    tags: item.tags ?? null,
+    frequency: item.frequency ?? null
+  }));
     res.set("Cache-Control", "no-store");
 
     res.json({
