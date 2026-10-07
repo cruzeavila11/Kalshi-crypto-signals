@@ -302,9 +302,7 @@ async function loadLiveMarkets() {
         : [];
 
     renderMarkets(markets);
-markets.forEach((market) => {
-  recordPriceHistory(market);
-});
+recordMarketPrices(markets);
     if (markets.length > 0) {
       showStatus("LIVE");
     } else {
