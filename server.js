@@ -218,7 +218,28 @@ app.get("/api/health", (req, res) => {
       CRYPTO_SERIES.map((x) => x.series)
   });
 });
+app.get("/api/discover-series", async (req, res) => {
+  try {
+    const response = await fetch(`${KALSHI}/series`, {
+      headers: {
+        Accept: "application/json"
+      }
+    });
 
+    const text = await response.text();
+
+    res.set("Cache-Control", "no-store");
+
+    res.status(response.status).send(text);
+  } catch (error) {
+    res.status(502).json({
+      error: "Series discovery failed",
+      message: error.message,
+      mode: "READ_ONLY",
+      tradingEnabled: false
+    });
+  }
+});
 app.listen(PORT, () => {
   console.log(
     `Read-only Kalshi crypto server listening on ${PORT}`
