@@ -3,15 +3,17 @@ import express from "express";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Kalshi production REST API
 const KALSHI =
-  "https://api.elections.kalshi.com/trade-api/v2";
+  "https://external-api.kalshi.com/trade-api/v2";
 
 app.use(express.static("."));
 
-function isCryptoMarket(market) {
-  const text = [
+function marketText(market) {
+  return [
     market.ticker,
     market.event_ticker,
+    market.series_ticker,
     market.title,
     market.subtitle,
     market.yes_sub_title,
@@ -20,39 +22,50 @@ function isCryptoMarket(market) {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-
-  return (
-    /\bbitcoin\b|\bbtc\b/.test(text) ||
-    /\bethereum\b|\beth\b/.test(text) ||
-    /\bsolana\b|\bsol\b/.test(text)
-  );
 }
 
 function getAsset(market) {
-  const text = [
-    market.ticker,
-    market.event_ticker,
-    market.title,
-    market.subtitle
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
+  const text = marketText(market);
 
-  if (/\bbitcoin\b|\bbtc\b/.test(text)) return "BTC";
-  if (/\bethereum\b|\beth\b/.test(text)) return "ETH";
-  if (/\bsolana\b|\bsol\b/.test(text)) return "SOL";
+  if (
+    text.includes("bitcoin") ||
+    text.includes("btc")
+  ) {
+    return "BTC";
+  }
 
-  return "CRYPTO";
+  if (
+    text.includes("ethereum") ||
+    text.includes("ether") ||
+    text.includes("eth")
+  ) {
+    return "ETH";
+  }
+
+  if (
+    text.includes("solana") ||
+    text.includes("sol")
+  ) {
+    return "SOL";
+  }
+
+  return null;
+}
+
+function isCryptoMarket(market) {
+  return getAsset(market) !== null;
 }
 
 function normalizeMarket(market) {
   return {
     asset: getAsset(market),
-    ticker: market.ticker,
-    event_ticker: market.event_ticker,
-    title: market.title,
-    subtitle: market.subtitle,
+
+    ticker: market.ticker ?? null,
+    event_ticker: market.event_ticker ?? null,
+    series_ticker: market.series_ticker ?? null,
+
+    title: market.title ?? null,
+    subtitle: market.subtitle ?? null,
 
     yes_bid_dollars:
       market.yes_bid_dollars ?? null,
@@ -89,120 +102,209 @@ function normalizeMarket(market) {
   };
 }
 
-async function fetchPage(cursor = "") {
-  const params = new URLSearchParams({
-    status: "open",
-    limit: "1000"
-  });
+async function fetchMarketPage(cursor = "") {
+  const params = new URLSearchParams();
+
+  params.set("status", "open");
+  params.set("limit", "1000");
 
   if (cursor) {
     params.set("cursor", cursor);
   }
 
-  const response = await fetch(
-    `${KALSHI}/markets?${params.toString()}`,
-    {
-      headers: {
-        Accept: "application/json"
-      }
+  const url =
+    `${KALSHI}/markets?${params.toString()}`;
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json"
     }
-  );
+  });
 
   if (!response.ok) {
     const body = await response.text();
 
     throw new Error(
-      `Kalshi returned ${response.status}: ${body.slice(0, 200)}`
+      `Kalshi returned ${response.status}: ` +
+      body.slice(0, 300)
     );
   }
 
   return response.json();
 }
 
-app.get("/api/markets", async (req, res) => {
-  try {
-    let cursor = "";
-    let pages = 0;
-    const cryptoMarkets = [];
+async function collectMarkets() {
+  const allMarkets = [];
 
-    /*
-      Read-only market discovery.
+  let cursor = "";
+  let pages = 0;
 
-      Pagination is capped so one dashboard refresh cannot
-      make an unlimited number of upstream requests.
-    */
-    while (pages < 10) {
-      const data = await fetchPage(cursor);
+  // Safety cap prevents accidental endless pagination.
+  while (pages < 20) {
+    const data = await fetchMarketPage(cursor);
 
-      const markets = Array.isArray(data.markets)
+    const markets =
+      Array.isArray(data.markets)
         ? data.markets
         : [];
 
-      for (const market of markets) {
-        if (isCryptoMarket(market)) {
-          cryptoMarkets.push(normalizeMarket(market));
-        }
-      }
+    allMarkets.push(...markets);
 
-      pages += 1;
+    pages += 1;
 
-      if (!data.cursor || markets.length === 0) {
-        break;
-      }
-
-      cursor = data.cursor;
+    if (!data.cursor || markets.length === 0) {
+      break;
     }
 
-    cryptoMarkets.sort((a, b) => {
-      const aTime = new Date(
-        a.close_time ||
-        a.expiration_time ||
-        0
-      ).getTime();
+    cursor = data.cursor;
+  }
 
-      const bTime = new Date(
-        b.close_time ||
-        b.expiration_time ||
-        0
-      ).getTime();
+  return {
+    markets: allMarkets,
+    pages
+  };
+}
 
-      return aTime - bTime;
-    });
+// Main read-only crypto endpoint
+app.get("/api/markets", async (req, res) => {
+  try {
+    const result = await collectMarkets();
+
+    const cryptoMarkets =
+      result.markets
+        .filter(isCryptoMarket)
+        .map(normalizeMarket)
+        .sort((a, b) => {
+          const aTime = new Date(
+            a.close_time ||
+            a.expiration_time ||
+            0
+          ).getTime();
+
+          const bTime = new Date(
+            b.close_time ||
+            b.expiration_time ||
+            0
+          ).getTime();
+
+          return aTime - bTime;
+        });
 
     res.set("Cache-Control", "no-store");
 
     res.json({
       source: "Kalshi",
-      readOnly: true,
-      fetchedAt: new Date().toISOString(),
-      markets: cryptoMarkets
+      mode: "READ_ONLY",
+      tradingEnabled: false,
+
+      fetchedAt:
+        new Date().toISOString(),
+
+      pagesChecked:
+        result.pages,
+
+      totalOpenMarketsChecked:
+        result.markets.length,
+
+      cryptoMarketsFound:
+        cryptoMarkets.length,
+
+      markets:
+        cryptoMarkets
     });
   } catch (error) {
-    console.error("Kalshi market request failed:", error);
+    console.error(
+      "Kalshi market request failed:",
+      error
+    );
 
     res.status(502).json({
-      error: "Kalshi market data unavailable",
-      readOnly: true,
+      error:
+        "Kalshi market data unavailable",
+
+      message:
+        error.message,
+
+      mode:
+        "READ_ONLY",
+
+      tradingEnabled:
+        false,
+
       markets: []
     });
   }
 });
 
-/*
-  Health check for Render.
+// Temporary read-only diagnostic endpoint.
+// This lets us see what Kalshi is actually
+// returning if crypto discovery still fails.
+app.get("/api/debug-markets", async (req, res) => {
+  try {
+    const result = await collectMarkets();
 
-  There are deliberately NO:
-  - order creation routes
-  - position routes
-  - trading routes
-  - private Kalshi credentials
-*/
+    const sample =
+      result.markets
+        .slice(0, 50)
+        .map((market) => ({
+          ticker:
+            market.ticker ?? null,
+
+          event_ticker:
+            market.event_ticker ?? null,
+
+          series_ticker:
+            market.series_ticker ?? null,
+
+          title:
+            market.title ?? null,
+
+          subtitle:
+            market.subtitle ?? null
+        }));
+
+    res.set("Cache-Control", "no-store");
+
+    res.json({
+      mode: "READ_ONLY",
+      tradingEnabled: false,
+
+      pagesChecked:
+        result.pages,
+
+      totalOpenMarketsChecked:
+        result.markets.length,
+
+      sample
+    });
+  } catch (error) {
+    console.error(
+      "Kalshi diagnostic request failed:",
+      error
+    );
+
+    res.status(502).json({
+      error:
+        "Kalshi diagnostic failed",
+
+      message:
+        error.message,
+
+      mode:
+        "READ_ONLY",
+
+      tradingEnabled:
+        false
+    });
+  }
+});
 
 app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
     mode: "READ_ONLY",
-    tradingEnabled: false
+    tradingEnabled: false,
+    apiBase: KALSHI
   });
 });
 
