@@ -146,6 +146,7 @@ function buildSignal(market) {
   }
 
   const move = price - previous;
+
   const bid = Number(market.yes_bid_dollars);
   const ask = Number(market.yes_ask_dollars);
 
@@ -154,35 +155,125 @@ function buildSignal(market) {
       ? Math.max(0, ask - bid)
       : null;
 
-  /*
-    Conservative observation signal only.
-    This is NOT a prediction of the final Kalshi outcome
-    and NEVER places a trade.
-  */
+  const volume = Number(
+    market.volume_fp ??
+    market.volume ??
+    0
+  );
 
-  if (move >= 0.05 && (spread === null || spread <= 0.08)) {
+  const closeTime =
+    market.close_time ??
+    market.expiration_time ??
+    market.expected_expiration_time;
+
+  const msLeft = closeTime
+    ? new Date(closeTime).getTime() - Date.now()
+    : NaN;
+
+  const minutesLeft = Number.isFinite(msLeft)
+    ? msLeft / 60000
+    : NaN;
+
+  if (Number.isFinite(minutesLeft) && minutesLeft <= 0) {
     return {
-      label: "WATCH YES",
-      strength: Math.min(90, Math.round(55 + move * 300)),
-      css: "up",
-      reason: "YES price has positive recent momentum"
+      label: "NO SIGNAL",
+      strength: 0,
+      css: "neutral",
+      reason: "Market is closing or closed"
     };
   }
 
-  if (move <= -0.05 && (spread === null || spread <= 0.08)) {
+  if (spread !== null && spread > 0.08) {
+    return {
+      label: "NO SIGNAL",
+      strength: 0,
+      css: "neutral",
+      reason: "Bid/ask spread is too wide"
+    };
+  }
+
+  if (price <= 0.02 || price >= 0.98) {
+    return {
+      label: "WATCH",
+      strength: 25,
+      css: "neutral",
+      reason: "Price is near an extreme level"
+    };
+  }
+
+  let score = 0;
+
+  // Momentum: maximum 40 points.
+  score += Math.min(
+    40,
+    Math.round(Math.abs(move) * 400)
+  );
+
+  // Tight spreads improve signal quality.
+  if (spread !== null) {
+    if (spread <= 0.01) {
+      score += 25;
+    } else if (spread <= 0.03) {
+      score += 18;
+    } else if (spread <= 0.05) {
+      score += 10;
+    }
+  }
+
+  // More traded markets get more weight.
+  if (Number.isFinite(volume)) {
+    if (volume >= 100000) {
+      score += 20;
+    } else if (volume >= 10000) {
+      score += 15;
+    } else if (volume >= 1000) {
+      score += 10;
+    } else if (volume > 0) {
+      score += 5;
+    }
+  }
+
+  // Prefer markets with useful time remaining.
+  if (Number.isFinite(minutesLeft)) {
+    if (minutesLeft >= 2 && minutesLeft <= 15) {
+      score += 15;
+    } else if (minutesLeft > 15 && minutesLeft <= 30) {
+      score += 8;
+    } else if (minutesLeft > 0 && minutesLeft < 2) {
+      score -= 10;
+    }
+  }
+
+  score = Math.max(0, Math.min(100, score));
+
+  const strongMove = Math.abs(move) >= 0.05;
+  const enoughQuality = score >= 60;
+
+  if (move >= 0.05 && strongMove && enoughQuality) {
+    return {
+      label: "WATCH YES",
+      strength: score,
+      css: "up",
+      reason:
+        "Positive momentum with supportive spread, volume, and timing"
+    };
+  }
+
+  if (move <= -0.05 && strongMove && enoughQuality) {
     return {
       label: "WATCH NO",
-      strength: Math.min(90, Math.round(55 + Math.abs(move) * 300)),
+      strength: score,
       css: "down",
-      reason: "YES price has negative recent momentum"
+      reason:
+        "Negative momentum with supportive spread, volume, and timing"
     };
   }
 
   return {
     label: "WATCH",
-    strength: Math.min(65, Math.round(45 + Math.abs(move) * 200)),
+    strength: score,
     css: "neutral",
-    reason: "No strong short-term price movement"
+    reason: "Setup does not meet the stronger signal threshold"
   };
 }
 
