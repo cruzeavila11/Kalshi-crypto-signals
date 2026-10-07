@@ -277,7 +277,7 @@ function renderMarkets(markets) {
 }
 
 function showStatus(text) {
-  const status = document.querySelector("#signals");
+  const status = document.querySelector("#statusText");
   if (status) status.textContent = text;
 }
 
