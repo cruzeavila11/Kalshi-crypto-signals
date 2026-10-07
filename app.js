@@ -1,5 +1,61 @@
 const REFRESH_MS = 30000;
+const PRICE_HISTORY_KEY = "kalshiCryptoPriceHistory";
+const HISTORY_MAX_AGE_MS = 15 * 60 * 1000;
 
+function loadPriceHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(PRICE_HISTORY_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function savePriceHistory(history) {
+  localStorage.setItem(PRICE_HISTORY_KEY, JSON.stringify(history));
+}
+
+function getStoredPreviousPrice(market) {
+  const asset = assetName(market);
+  const history = loadPriceHistory();
+  const entries = Array.isArray(history[asset]) ? history[asset] : [];
+  const now = Date.now();
+
+  const valid = entries.filter(
+    (entry) =>
+      Number.isFinite(Number(entry.price)) &&
+      now - Number(entry.time) <= HISTORY_MAX_AGE_MS
+  );
+
+  if (valid.length === 0) return NaN;
+
+  return Number(valid[0].price);
+}
+
+function recordMarketPrices(markets) {
+  const history = loadPriceHistory();
+  const now = Date.now();
+
+  for (const market of markets) {
+    const asset = assetName(market);
+    const price = marketPrice(market);
+
+    if (!["BTC", "ETH", "SOL"].includes(asset)) continue;
+    if (!Number.isFinite(price) || price <= 0) continue;
+
+    const entries = Array.isArray(history[asset]) ? history[asset] : [];
+
+    entries.push({
+      price,
+      time: now
+    });
+
+    history[asset] = entries
+      .filter((entry) => now - Number(entry.time) <= HISTORY_MAX_AGE_MS)
+      .slice(-30);
+  }
+
+  savePriceHistory(history);
+}
 function money(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "--";
@@ -65,17 +121,15 @@ function previousPrice(market) {
     market.previous_price_dollars ??
     market.previousPrice;
 
-  if (raw === null || raw === undefined || raw === "") {
-    return NaN;
+  if (raw !== null && raw !== undefined && raw !== "") {
+    const previous = Number(raw);
+
+    if (Number.isFinite(previous) && previous > 0) {
+      return previous;
+    }
   }
 
-  const previous = Number(raw);
-
-  if (!Number.isFinite(previous) || previous <= 0) {
-    return NaN;
-  }
-
-  return previous;
+  return getStoredPreviousPrice(market);
 }
 
 function buildSignal(market) {
@@ -248,7 +302,9 @@ async function loadLiveMarkets() {
         : [];
 
     renderMarkets(markets);
-
+markets.forEach((market) => {
+  recordPriceHistory(market);
+});
     if (markets.length > 0) {
       showStatus("LIVE");
     } else {
