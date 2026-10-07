@@ -3,62 +3,21 @@ import express from "express";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Kalshi production REST API
 const KALSHI =
   "https://external-api.kalshi.com/trade-api/v2";
 
 app.use(express.static("."));
 
-function marketText(market) {
-  return [
-    market.ticker,
-    market.event_ticker,
-    market.series_ticker,
-    market.title,
-    market.subtitle,
-    market.yes_sub_title,
-    market.no_sub_title
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-}
+// Only the crypto series we intentionally monitor.
+const CRYPTO_SERIES = [
+  { asset: "BTC", series: "KXBTCPERP" },
+  { asset: "ETH", series: "KXETHPERP" },
+  { asset: "SOL", series: "KXSOLPERP" }
+];
 
-function getAsset(market) {
-  const text = marketText(market);
-
-  if (
-    text.includes("bitcoin") ||
-    text.includes("btc")
-  ) {
-    return "BTC";
-  }
-
-  if (
-    text.includes("ethereum") ||
-    text.includes("ether") ||
-    text.includes("eth")
-  ) {
-    return "ETH";
-  }
-
-  if (
-    text.includes("solana") ||
-    text.includes("sol")
-  ) {
-    return "SOL";
-  }
-
-  return null;
-}
-
-function isCryptoMarket(market) {
-  return getAsset(market) !== null;
-}
-
-function normalizeMarket(market) {
+function normalizeMarket(market, asset) {
   return {
-    asset: getAsset(market),
+    asset,
 
     ticker: market.ticker ?? null,
     event_ticker: market.event_ticker ?? null,
@@ -97,98 +56,82 @@ function normalizeMarket(market) {
     expected_expiration_time:
       market.expected_expiration_time ?? null,
 
-    status:
-      market.status ?? null
+    status: market.status ?? null
   };
 }
 
-async function fetchMarketPage(cursor = "") {
-  const params = new URLSearchParams();
-
-  params.set("status", "open");
-  params.set("limit", "1000");
-
-  if (cursor) {
-    params.set("cursor", cursor);
-  }
-
-  const url =
-    `${KALSHI}/markets?${params.toString()}`;
-
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/json"
-    }
+async function fetchSeriesMarkets(asset, series) {
+  const params = new URLSearchParams({
+    status: "open",
+    series_ticker: series,
+    limit: "1000"
   });
+
+  const response = await fetch(
+    `${KALSHI}/markets?${params.toString()}`,
+    {
+      headers: {
+        Accept: "application/json"
+      }
+    }
+  );
 
   if (!response.ok) {
     const body = await response.text();
 
     throw new Error(
-      `Kalshi returned ${response.status}: ` +
-      body.slice(0, 300)
+      `${asset}/${series} returned ` +
+      `${response.status}: ${body.slice(0, 250)}`
     );
   }
 
-  return response.json();
-}
-
-async function collectMarkets() {
-  const allMarkets = [];
-
-  let cursor = "";
-  let pages = 0;
-
-  // Safety cap prevents accidental endless pagination.
-  while (pages < 20) {
-    const data = await fetchMarketPage(cursor);
-
-    const markets =
-      Array.isArray(data.markets)
-        ? data.markets
-        : [];
-
-    allMarkets.push(...markets);
-
-    pages += 1;
-
-    if (!data.cursor || markets.length === 0) {
-      break;
-    }
-
-    cursor = data.cursor;
-  }
+  const data = await response.json();
 
   return {
-    markets: allMarkets,
-    pages
+    asset,
+    series,
+    markets: Array.isArray(data.markets)
+      ? data.markets
+      : []
   };
 }
 
-// Main read-only crypto endpoint
 app.get("/api/markets", async (req, res) => {
   try {
-    const result = await collectMarkets();
+    const results = await Promise.all(
+      CRYPTO_SERIES.map(({ asset, series }) =>
+        fetchSeriesMarkets(asset, series)
+      )
+    );
 
-    const cryptoMarkets =
-      result.markets
-        .filter(isCryptoMarket)
-        .map(normalizeMarket)
-        .sort((a, b) => {
-          const aTime = new Date(
-            a.close_time ||
-            a.expiration_time ||
-            0
-          ).getTime();
+    const markets = results
+      .flatMap(({ asset, markets }) =>
+        markets.map((market) =>
+          normalizeMarket(market, asset)
+        )
+      )
+      .sort((a, b) => {
+        const aTime = new Date(
+          a.close_time ||
+          a.expiration_time ||
+          0
+        ).getTime();
 
-          const bTime = new Date(
-            b.close_time ||
-            b.expiration_time ||
-            0
-          ).getTime();
+        const bTime = new Date(
+          b.close_time ||
+          b.expiration_time ||
+          0
+        ).getTime();
 
-          return aTime - bTime;
-        });
+        return aTime - bTime;
+      });
+
+    const counts = {};
+
+    for (const result of results) {
+      counts[result.asset] =
+        result.markets.length;
+    }
 
     res.set("Cache-Control", "no-store");
 
@@ -196,72 +139,37 @@ app.get("/api/markets", async (req, res) => {
       source: "Kalshi",
       mode: "READ_ONLY",
       tradingEnabled: false,
-
-      fetchedAt:
-        new Date().toISOString(),
-
-      pagesChecked:
-        result.pages,
-
-      totalOpenMarketsChecked:
-        result.markets.length,
-
-      cryptoMarketsFound:
-        cryptoMarkets.length,
-
-      markets:
-        cryptoMarkets
+      fetchedAt: new Date().toISOString(),
+      seriesChecked:
+        CRYPTO_SERIES.map((x) => x.series),
+      counts,
+      cryptoMarketsFound: markets.length,
+      markets
     });
   } catch (error) {
     console.error(
-      "Kalshi market request failed:",
+      "Kalshi crypto request failed:",
       error
     );
 
     res.status(502).json({
-      error:
-        "Kalshi market data unavailable",
-
-      message:
-        error.message,
-
-      mode:
-        "READ_ONLY",
-
-      tradingEnabled:
-        false,
-
+      error: "Kalshi crypto data unavailable",
+      message: error.message,
+      mode: "READ_ONLY",
+      tradingEnabled: false,
       markets: []
     });
   }
 });
 
-// Temporary read-only diagnostic endpoint.
-// This lets us see what Kalshi is actually
-// returning if crypto discovery still fails.
+// Diagnostic endpoint for the exact series only.
 app.get("/api/debug-markets", async (req, res) => {
   try {
-    const result = await collectMarkets();
-
-    const sample =
-      result.markets
-        .slice(0, 50)
-        .map((market) => ({
-          ticker:
-            market.ticker ?? null,
-
-          event_ticker:
-            market.event_ticker ?? null,
-
-          series_ticker:
-            market.series_ticker ?? null,
-
-          title:
-            market.title ?? null,
-
-          subtitle:
-            market.subtitle ?? null
-        }));
+    const results = await Promise.all(
+      CRYPTO_SERIES.map(({ asset, series }) =>
+        fetchSeriesMarkets(asset, series)
+      )
+    );
 
     res.set("Cache-Control", "no-store");
 
@@ -269,32 +177,33 @@ app.get("/api/debug-markets", async (req, res) => {
       mode: "READ_ONLY",
       tradingEnabled: false,
 
-      pagesChecked:
-        result.pages,
+      results: results.map((result) => ({
+        asset: result.asset,
+        series: result.series,
+        count: result.markets.length,
 
-      totalOpenMarketsChecked:
-        result.markets.length,
-
-      sample
+        sample: result.markets
+          .slice(0, 5)
+          .map((market) => ({
+            ticker: market.ticker ?? null,
+            event_ticker:
+              market.event_ticker ?? null,
+            title: market.title ?? null,
+            yes_bid_dollars:
+              market.yes_bid_dollars ?? null,
+            yes_ask_dollars:
+              market.yes_ask_dollars ?? null,
+            last_price_dollars:
+              market.last_price_dollars ?? null
+          }))
+      }))
     });
   } catch (error) {
-    console.error(
-      "Kalshi diagnostic request failed:",
-      error
-    );
-
     res.status(502).json({
-      error:
-        "Kalshi diagnostic failed",
-
-      message:
-        error.message,
-
-      mode:
-        "READ_ONLY",
-
-      tradingEnabled:
-        false
+      error: "Kalshi diagnostic failed",
+      message: error.message,
+      mode: "READ_ONLY",
+      tradingEnabled: false
     });
   }
 });
@@ -304,12 +213,14 @@ app.get("/api/health", (req, res) => {
     ok: true,
     mode: "READ_ONLY",
     tradingEnabled: false,
-    apiBase: KALSHI
+    apiBase: KALSHI,
+    monitoredSeries:
+      CRYPTO_SERIES.map((x) => x.series)
   });
 });
 
 app.listen(PORT, () => {
   console.log(
-    `Read-only Kalshi signal server listening on ${PORT}`
+    `Read-only Kalshi crypto server listening on ${PORT}`
   );
 });
