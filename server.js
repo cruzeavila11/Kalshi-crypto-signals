@@ -224,7 +224,19 @@ async function findBestLiveMarkets() {
           await fetchOpenMarketsForSeries(series);
 
         if (markets.length > 0) {
-          assetMarkets = markets;
+      assetMarkets = markets
+  .sort((a, b) => {
+    const aTime = new Date(
+      a.close_time || a.expiration_time || 0
+    ).getTime();
+
+    const bTime = new Date(
+      b.close_time || b.expiration_time || 0
+    ).getTime();
+
+    return aTime - bTime;
+  })
+  .slice(0, 1);
           break;
         }
       } catch (error) {
