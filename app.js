@@ -61,11 +61,21 @@ function marketPrice(market) {
 }
 
 function previousPrice(market) {
-  return Number(
+  const raw =
     market.previous_price_dollars ??
-    market.previousPrice ??
-    marketPrice(market)
-  );
+    market.previousPrice;
+
+  if (raw === null || raw === undefined || raw === "") {
+    return NaN;
+  }
+
+  const previous = Number(raw);
+
+  if (!Number.isFinite(previous) || previous <= 0) {
+    return NaN;
+  }
+
+  return previous;
 }
 
 function buildSignal(market) {
