@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1020">
+  <link rel="manifest" href="manifest.json">
+  <title>Kalshi Crypto Signals</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">SIGNAL-ONLY • NO AUTOMATED TRADING</div>
+      <h1>Kalshi Crypto Signals</h1>
+    </div>
+    <div class="status"><span id="dot"></span><span id="statusText">Demo mode</span></div>
+  </header>
+
+  <main>
+    <section class="hero card">
+      <div>
+        <div class="muted">Monitoring</div>
+        <div class="heroTitle">BTC • ETH • SOL</div>
+        <div class="muted">The dashboard watches markets and notifies you. It never places an order.</div>
+      </div>
+      <button id="notifyBtn" class="primary">Enable Alerts</button>
+    </section>
+
+    <section class="grid" id="marketGrid"></section>
+
+    <section class="card">
+      <div class="sectionHead">
+        <div>
+          <div class="muted">Signal engine</div>
+          <h2>What the bot is seeing</h2>
+        </div>
+        <span class="pill">PAPER / OBSERVE ONLY</span>
+      </div>
+      <div id="signalFeed" class="feed"></div>
+    </section>
+
+    <section class="card">
+      <div class="sectionHead">
+        <div>
+          <div class="muted">Tracking</div>
+          <h2>Signal history</h2>
+        </div>
+      </div>
+      <div class="stats">
+        <div><b id="signals">0</b><span>signals</span></div>
+        <div><b id="wins">—</b><span>resolved correct</span></div>
+        <div><b id="accuracy">—</b><span>accuracy</span></div>
+      </div>
+      <p class="small muted">Accuracy stays blank until enough signals have actually resolved. A “confidence” score is not treated as a guaranteed probability.</p>
+    </section>
+
+    <section class="card">
+      <div class="sectionHead">
+        <div>
+          <div class="muted">Connection</div>
+          <h2>Live mode setup</h2>
+        </div>
+      </div>
+      <p class="muted">This front end is ready for a cloud data service. Keep Kalshi API credentials off the iPad/browser; the cloud service should handle market-data access.</p>
+      <div class="endpoint">
+        <label>Cloud data endpoint</label>
+        <input id="endpoint" placeholder="https://your-cloud-service.example/api/markets">
+        <button id="saveEndpoint" class="secondary">Save</button>
+      </div>
+      <p id="endpointMsg" class="small muted"></p>
+    </section>
+  </main>
+
+  <footer>
+    <span>Signal tool only • You decide whether to trade.</span>
+    <span>Not financial advice.</span>
+  </footer>
+
+<script src="app.js"></script>
+</body>
+</html>
