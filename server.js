@@ -226,11 +226,54 @@ app.get("/api/discover-series", async (req, res) => {
       }
     });
 
-    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`Kalshi returned ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    const series = Array.isArray(data.series)
+      ? data.series
+      : [];
+
+    const matches = series
+      .filter((item) => {
+        const text = [
+          item.ticker,
+          item.title,
+          item.category,
+          ...(Array.isArray(item.tags) ? item.tags : [])
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        return (
+          text.includes("bitcoin") ||
+          text.includes("ethereum") ||
+          text.includes("solana") ||
+          /\bbtc\b/.test(text) ||
+          /\beth\b/.test(text) ||
+          /\bsol\b/.test(text)
+        );
+      })
+      .map((item) => ({
+        ticker: item.ticker ?? null,
+        title: item.title ?? null,
+        category: item.category ?? null,
+        tags: item.tags ?? null,
+        frequency: item.frequency ?? null
+      }));
 
     res.set("Cache-Control", "no-store");
 
-    res.status(response.status).send(text);
+    res.json({
+      mode: "READ_ONLY",
+      tradingEnabled: false,
+      totalSeriesChecked: series.length,
+      cryptoSeriesFound: matches.length,
+      matches
+    });
   } catch (error) {
     res.status(502).json({
       error: "Series discovery failed",
