@@ -28,7 +28,51 @@
     </section>
 
     <section class="grid" id="marketGrid"></section>
+<section class="card" id="positionTracker">
+  <div class="sectionHead">
+    <div>
+      <div class="muted">Position management</div>
+      <h2>My Position</h2>
+    </div>
+    <span class="pill">MANUAL / READ ONLY</span>
+  </div>
 
+  <div id="positionControls">
+    <label>
+      Asset
+      <select id="positionAsset">
+        <option value="BTC">BTC</option>
+        <option value="ETH">ETH</option>
+        <option value="SOL">SOL</option>
+      </select>
+    </label>
+
+    <label>
+      Side
+      <select id="positionSide">
+        <option value="YES">YES</option>
+        <option value="NO">NO</option>
+      </select>
+    </label>
+
+    <label>
+      Entry price (¢)
+      <input id="entryPrice" type="number" min="1" max="99" step="1">
+    </label>
+
+    <label>
+      Contracts
+      <input id="positionSize" type="number" min="1" step="1">
+    </label>
+
+    <button id="savePosition" class="primary">Track Position</button>
+    <button id="clearPosition">Clear Position</button>
+  </div>
+
+  <div id="positionStatus" class="feed">
+    No position currently being tracked.
+  </div>
+</section>
     <section class="card">
       <div class="sectionHead">
         <div>
