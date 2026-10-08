@@ -1,7 +1,23 @@
 const REFRESH_MS = 30000;
 const PRICE_HISTORY_KEY = "kalshiCryptoPriceHistory";
 const HISTORY_MAX_AGE_MS = 15 * 60 * 1000;
+const POSITION_KEY = "kalshiTrackedPosition";
 
+function loadPosition() {
+  try {
+    return JSON.parse(localStorage.getItem(POSITION_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function savePosition(position) {
+  localStorage.setItem(POSITION_KEY, JSON.stringify(position));
+}
+
+function clearSavedPosition() {
+  localStorage.removeItem(POSITION_KEY);
+}
 function loadPriceHistory() {
   try {
     return JSON.parse(localStorage.getItem(PRICE_HISTORY_KEY) || "{}");
@@ -464,7 +480,74 @@ if (notifyButton) {
         : "Alerts Not Enabled";
   };
 }
+const savePositionButton = document.querySelector("#savePosition");
+const clearPositionButton = document.querySelector("#clearPosition");
+const positionStatus = document.querySelector("#positionStatus");
 
+function renderTrackedPosition() {
+  const position = loadPosition();
+
+  if (!position) {
+    if (positionStatus) {
+      positionStatus.textContent = "No position currently being tracked.";
+    }
+    return;
+  }
+
+  if (positionStatus) {
+    positionStatus.textContent =
+      `${position.asset} ${position.side} • Entry ${position.entryPrice}¢ • ` +
+      `${position.contracts} contracts`;
+  }
+}
+
+if (savePositionButton) {
+  savePositionButton.onclick = () => {
+    const asset = document.querySelector("#positionAsset")?.value;
+    const side = document.querySelector("#positionSide")?.value;
+    const entryPrice = Number(document.querySelector("#entryPrice")?.value);
+    const contracts = Number(document.querySelector("#positionSize")?.value);
+
+    if (
+      !["BTC", "ETH", "SOL"].includes(asset) ||
+      !["YES", "NO"].includes(side) ||
+      !Number.isFinite(entryPrice) ||
+      entryPrice <= 0 ||
+      entryPrice >= 100 ||
+      !Number.isFinite(contracts) ||
+      contracts <= 0
+    ) {
+      alert("Please enter a valid asset, side, entry price, and contract count.");
+      return;
+    }
+
+    savePosition({
+      asset,
+      side,
+      entryPrice,
+      contracts,
+      openedAt: Date.now()
+    });
+
+    renderTrackedPosition();
+  };
+}
+
+if (clearPositionButton) {
+  clearPositionButton.onclick = () => {
+    clearSavedPosition();
+
+    const entryPriceInput = document.querySelector("#entryPrice");
+    const positionSizeInput = document.querySelector("#positionSize");
+
+    if (entryPriceInput) entryPriceInput.value = "";
+    if (positionSizeInput) positionSizeInput.value = "";
+
+    renderTrackedPosition();
+  };
+}
+
+renderTrackedPosition();
 loadEndpoint();
 loadLiveMarkets();
 
