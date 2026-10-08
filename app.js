@@ -2,7 +2,7 @@ const REFRESH_MS = 30000;
 const PRICE_HISTORY_KEY = "kalshiCryptoPriceHistory";
 const HISTORY_MAX_AGE_MS = 15 * 60 * 1000;
 const POSITION_KEY = "kalshiTrackedPosition";
-
+let latestMarkets = [];
 function loadPosition() {
   try {
     return JSON.parse(localStorage.getItem(POSITION_KEY) || "null");
@@ -407,9 +407,10 @@ async function loadLiveMarkets() {
       : Array.isArray(data.markets)
         ? data.markets
         : [];
-
+latestMarkets = markets;
     renderMarkets(markets);
 recordMarketPrices(markets);
+    renderTrackedPosition();
     if (markets.length > 0) {
       showStatus("LIVE");
     } else {
@@ -489,15 +490,128 @@ function renderTrackedPosition() {
 
   if (!position) {
     if (positionStatus) {
-      positionStatus.textContent = "No position currently being tracked.";
+      positionStatus.textContent =
+        "No position currently being tracked.";
     }
     return;
   }
 
+  const market = latestMarkets.find(
+    (item) => assetName(item) === position.asset
+  );
+
+  if (!market) {
+    if (positionStatus) {
+      positionStatus.textContent =
+        `${position.asset} ${position.side} • Entry ${position.entryPrice}¢ • ` +
+        `${position.contracts} contracts • Waiting for live market data`;
+    }
+    return;
+  }
+
+  const yesBid = Number(market.yes_bid_dollars);
+  const yesAsk = Number(market.yes_ask_dollars);
+  const fallbackYes = marketPrice(market);
+
+  let currentDollars;
+
+  if (position.side === "YES") {
+    currentDollars =
+      Number.isFinite(yesBid)
+        ? yesBid
+        : fallbackYes;
+  } else {
+    currentDollars =
+      Number.isFinite(yesAsk)
+        ? 1 - yesAsk
+        : 1 - fallbackYes;
+  }
+
+  if (!Number.isFinite(currentDollars)) {
+    if (positionStatus) {
+      positionStatus.textContent =
+        `${position.asset} ${position.side} • Live position price unavailable`;
+    }
+    return;
+  }
+
+  currentDollars = Math.max(0, Math.min(1, currentDollars));
+
+  const currentCents = currentDollars * 100;
+  const entryCents = Number(position.entryPrice);
+  const contracts = Number(position.contracts);
+
+  const pnlCentsPerContract = currentCents - entryCents;
+  const pnlDollars =
+    (pnlCentsPerContract * contracts) / 100;
+
+  const positionValue =
+    (currentCents * contracts) / 100;
+
+  const costBasis =
+    (entryCents * contracts) / 100;
+
+  const returnPct =
+    costBasis > 0
+      ? (pnlDollars / costBasis) * 100
+      : 0;
+
+  const closeTime =
+    market.close_time ??
+    market.expiration_time ??
+    market.expected_expiration_time;
+
+  const minutesLeft = closeTime
+    ? (new Date(closeTime).getTime() - Date.now()) / 60000
+    : NaN;
+
+  const signal = buildSignal(market);
+
+  const oppositeSignal =
+    (position.side === "YES" && signal.label === "WATCH NO") ||
+    (position.side === "NO" && signal.label === "WATCH YES");
+
+  let status = "HOLD";
+  let reason = "Position remains within current risk and profit thresholds.";
+
+  if (Number.isFinite(minutesLeft) && minutesLeft <= 0) {
+    status = "CLOSED";
+    reason = "The tracked market has reached its closing time.";
+  } else if (Number.isFinite(minutesLeft) && minutesLeft <= 2) {
+    status = "CLOSE";
+    reason = "Very little market time remains.";
+  } else if (returnPct <= -20) {
+    status = "RISK EXIT";
+    reason = "The position has crossed the current loss-control threshold.";
+  } else if (oppositeSignal) {
+    status = "CLOSE";
+    reason = "The live signal has reversed against the tracked position.";
+  } else if (returnPct >= 25) {
+    status = "TAKE PROFIT";
+    reason = "The position has crossed the current profit threshold.";
+  }
+
+  const pnlSign = pnlDollars >= 0 ? "+" : "";
+
   if (positionStatus) {
-    positionStatus.textContent =
-      `${position.asset} ${position.side} • Entry ${position.entryPrice}¢ • ` +
-      `${position.contracts} contracts`;
+    positionStatus.innerHTML = `
+      <div class="feedItem">
+        <b>${position.asset} ${position.side}</b> •
+        Entry ${entryCents.toFixed(0)}¢ •
+        Current ${currentCents.toFixed(1)}¢ •
+        ${contracts} contracts
+      </div>
+
+      <div class="feedItem">
+        Value $${positionValue.toFixed(2)} •
+        P/L ${pnlSign}$${pnlDollars.toFixed(2)} •
+        Return ${pnlSign}${returnPct.toFixed(1)}%
+      </div>
+
+      <div class="feedItem">
+        <b>${status}</b> — ${reason}
+      </div>
+    `;
   }
 }
 
