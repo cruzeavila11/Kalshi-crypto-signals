@@ -571,25 +571,67 @@ function renderTrackedPosition() {
     (position.side === "YES" && signal.label === "WATCH NO") ||
     (position.side === "NO" && signal.label === "WATCH YES");
 
-  let status = "HOLD";
-  let reason = "Position remains within current risk and profit thresholds.";
+  const nearExpiry =
+  Number.isFinite(minutesLeft) && minutesLeft <= 5;
 
-  if (Number.isFinite(minutesLeft) && minutesLeft <= 0) {
-    status = "CLOSED";
-    reason = "The tracked market has reached its closing time.";
-  } else if (Number.isFinite(minutesLeft) && minutesLeft <= 2) {
-    status = "CLOSE";
-    reason = "Very little market time remains.";
-  } else if (returnPct <= -20) {
-    status = "RISK EXIT";
-    reason = "The position has crossed the current loss-control threshold.";
-  } else if (oppositeSignal) {
-    status = "CLOSE";
-    reason = "The live signal has reversed against the tracked position.";
-  } else if (returnPct >= 25) {
-    status = "TAKE PROFIT";
-    reason = "The position has crossed the current profit threshold.";
-  }
+const veryNearExpiry =
+  Number.isFinite(minutesLeft) && minutesLeft <= 2;
+
+const strongProfit = returnPct >= 50;
+const goodProfit = returnPct >= 25;
+const seriousLoss = returnPct <= -25;
+const moderateLoss = returnPct <= -15;
+
+const nearMaxValue = currentCents >= 90;
+
+let status = "HOLD";
+let reason =
+  "Position remains within the current risk and profit conditions.";
+
+if (Number.isFinite(minutesLeft) && minutesLeft <= 0) {
+  status = "CLOSED";
+  reason = "The tracked market has reached its closing time.";
+
+} else if (seriousLoss) {
+  status = "RISK EXIT";
+  reason =
+    "Loss has crossed the maximum current risk threshold.";
+
+} else if (oppositeSignal && moderateLoss) {
+  status = "RISK EXIT";
+  reason =
+    "The position is losing value and the live signal has reversed.";
+
+} else if (oppositeSignal) {
+  status = "CLOSE";
+  reason =
+    "The live signal has reversed against the tracked position.";
+
+} else if (strongProfit) {
+  status = "TAKE PROFIT";
+  reason =
+    "A large unrealized gain has developed.";
+
+} else if (nearMaxValue && goodProfit) {
+  status = "TAKE PROFIT";
+  reason =
+    "The contract is near its maximum value with a meaningful gain.";
+
+} else if (veryNearExpiry && returnPct > 0) {
+  status = "TAKE PROFIT";
+  reason =
+    "Very little time remains and the position is currently profitable.";
+
+} else if (nearExpiry && goodProfit) {
+  status = "TAKE PROFIT";
+  reason =
+    "The position has a meaningful gain with limited time remaining.";
+
+} else {
+  status = "HOLD";
+  reason =
+    "No exit condition currently outweighs the case for holding.";
+}
 
   const pnlSign = pnlDollars >= 0 ? "+" : "";
 
