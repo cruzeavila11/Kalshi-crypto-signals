@@ -92,11 +92,12 @@
         </div>
       </div>
       <div class="stats">
-        <div><b id="signals">0</b><span>signals</span></div>
-        <div><b id="wins">—</b><span>resolved correct</span></div>
-        <div><b id="accuracy">—</b><span>accuracy</span></div>
+        <div><b id="signals">0</b><span>contracts tracked</span></div>
+        <div><b id="wins">—</b><span>contracts correct</span></div>
+        <div><b id="accuracy">—</b><span>contract accuracy</span></div>
       </div>
-      <p class="small muted">Accuracy stays blank until enough signals have actually resolved. A “confidence” score is not treated as a guaranteed probability.</p>
+      <p class="small muted">Contract accuracy counts each exact ticker once, using its earliest recorded directional observation in retained history (recording order breaks timestamp ties). Observation accuracy counts every directional transition. Unresolved and invalid results are excluded from both percentages. Evidence scores are not win probabilities. History is local to this browser and retains up to 500 observations from the last 30 days; pruning can remove a contract’s original first observation.</p>
+      <div id="signalHistoryDetails" class="small muted" style="white-space: pre-line"></div>
     </section>
   </main>
   <footer>

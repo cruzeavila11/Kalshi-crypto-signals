@@ -379,6 +379,50 @@ app.get("/api/markets", async (req, res) => {
   }
 });
 
+function classifyMarketOutcome(ticker, market) {
+  if (!market || market.ticker !== ticker) {
+    return { ticker, outcome: "invalid", reason: "Market identity mismatch." };
+  }
+  if (!["finalized", "settled"].includes(market.status)) {
+    return { ticker, outcome: "unresolved", reason: "Awaiting an explicit final result." };
+  }
+  const result = String(market.result || "").toLowerCase();
+  const settlement = market.settlement_value_dollars;
+  if (
+    !["yes", "no"].includes(result) ||
+    (settlement !== undefined && settlement !== null &&
+      (String(settlement).trim() === "" || Number(settlement) !== (result === "yes" ? 1 : 0)))
+  ) {
+    return { ticker, outcome: "invalid", reason: "Final result is missing, nonbinary, or inconsistent." };
+  }
+  return { ticker, outcome: result, reason: "Explicit final Kalshi result." };
+}
+
+app.get("/api/market-outcomes", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const raw = req.query.tickers;
+  const tickers = typeof raw === "string" ? [...new Set(raw.split(","))] : [];
+  if (!tickers.length || tickers.length > 20 ||
+      tickers.some(ticker => !/^[A-Za-z0-9_.-]{1,128}$/.test(ticker))) {
+    return res.status(400).json({ error: "Supply 1–20 valid market tickers.", mode: "READ_ONLY", tradingEnabled: false });
+  }
+  const outcomes = [];
+  for (const ticker of tickers) {
+    try {
+      const response = await fetch(`${KALSHI}/markets/${encodeURIComponent(ticker)}`, {
+        headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15000)
+      });
+      if (!response.ok) throw new Error(`Kalshi HTTP ${response.status}`);
+      const data = await response.json();
+      outcomes.push(classifyMarketOutcome(ticker, data.market));
+    } catch (error) {
+      // Network failures/404s are not evidence of a losing or invalid signal.
+      outcomes.push({ ticker, outcome: "unresolved", reason: "Outcome lookup failed; will retry.", lookupError: error.message });
+    }
+  }
+  res.json({ mode: "READ_ONLY", tradingEnabled: false, outcomes });
+});
+
 app.get("/api/discover-series", async (req, res) => {
   try {
     const matches = await discoverCryptoSeries();

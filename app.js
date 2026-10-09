@@ -293,6 +293,201 @@ function buildSignal(market) {
   };
 }
 
+const SIGNAL_HISTORY_KEY = "kalshiSignalObservationsV1";
+const SIGNAL_HISTORY_LIMIT = 500;
+const SIGNAL_HISTORY_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const OUTCOME_RETRY_MS = 5 * 60 * 1000;
+let signalHistory = null;
+let outcomeResolutionInFlight = false;
+
+function loadSignalHistory() {
+  if (signalHistory) return signalHistory;
+  try {
+    const saved = JSON.parse(localStorage.getItem(SIGNAL_HISTORY_KEY) || "null");
+    if (saved?.version === 1 && Array.isArray(saved.observations) && Array.isArray(saved.states)) {
+      signalHistory = saved;
+    }
+  } catch (error) {
+    console.warn("Unable to read signal history:", error);
+  }
+  signalHistory ||= { version: 1, observations: [], states: [] };
+  pruneSignalHistory();
+  return signalHistory;
+}
+
+function pruneSignalHistory(now = Date.now()) {
+  signalHistory.observations = signalHistory.observations.filter(record =>
+    record && typeof record.ticker === "string" &&
+    ["WATCH YES", "WATCH NO"].includes(record.direction) &&
+    ["correct", "incorrect", "unresolved", "invalid"].includes(record.outcome) &&
+    Number.isFinite(record.evidenceScore) && record.evidenceScore >= 0 && record.evidenceScore <= 100 &&
+    Number.isFinite(record.timestamp) && record.timestamp >= now - SIGNAL_HISTORY_AGE_MS
+  ).slice(-SIGNAL_HISTORY_LIMIT);
+  signalHistory.states = signalHistory.states.filter(state =>
+    state && typeof state.ticker === "string" && Number.isFinite(state.timestamp) &&
+    state.timestamp >= now - SIGNAL_HISTORY_AGE_MS
+  ).slice(-SIGNAL_HISTORY_LIMIT);
+}
+
+function saveSignalHistory() {
+  pruneSignalHistory();
+  try {
+    localStorage.setItem(SIGNAL_HISTORY_KEY, JSON.stringify(signalHistory));
+  } catch (error) {
+    // Session memory stays authoritative even if persistence fails.
+    console.warn("Unable to persist signal history:", error);
+  }
+}
+
+function observeSignal(market, signal, now = Date.now()) {
+  const history = loadSignalHistory();
+  const ticker = market.ticker;
+  if (typeof ticker !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test(ticker)) return;
+  const previous = history.states.find(state => state.ticker === ticker);
+  const changed = previous?.label !== signal.label;
+  history.states = history.states.filter(state => state.ticker !== ticker);
+  history.states.push({ ticker, label: signal.label, timestamp: now });
+  if (!changed || !["WATCH YES", "WATCH NO"].includes(signal.label)) return;
+
+  const numeric = value => value === null || value === undefined || String(value).trim() === "" ||
+    !Number.isFinite(Number(value)) ? null : Number(value);
+  const bid = numeric(market.yes_bid_dollars);
+  const ask = numeric(market.yes_ask_dollars);
+  const closeTime = market.close_time ?? market.expiration_time ?? market.expected_expiration_time;
+  const closeTimestamp = closeTime ? new Date(closeTime).getTime() : NaN;
+  history.observations.push({
+    asset: assetName(market), ticker, direction: signal.label,
+    evidenceScore: signal.strength, price: numeric(marketPrice(market)),
+    yesBid: bid, yesAsk: ask,
+    volume: numeric(market.volume_fp ?? market.volume),
+    openInterest: numeric(market.open_interest_fp ?? market.open_interest),
+    spread: bid !== null && ask !== null && ask >= bid ? ask - bid : null,
+    minutesLeft: Number.isFinite(closeTimestamp) ? (closeTimestamp - now) / 60000 : null,
+    closeTimestamp: Number.isFinite(closeTimestamp) ? closeTimestamp : null,
+    timestamp: now, outcome: "unresolved", result: null, nextCheckAt: 0
+  });
+}
+
+function applySignalOutcomes(outcomes, now = Date.now()) {
+  const history = loadSignalHistory();
+  for (const result of outcomes) {
+    for (const record of history.observations) {
+      if (record.ticker !== result.ticker || record.outcome !== "unresolved") continue;
+      record.checkedAt = now;
+      record.nextCheckAt = now + OUTCOME_RETRY_MS;
+      record.lookupError = result.lookupError || null;
+      record.outcomeReason = result.reason || "Awaiting a reliable result.";
+      if (result.outcome === "invalid") {
+        record.outcome = "invalid";
+      } else if (["yes", "no"].includes(result.outcome)) {
+        record.result = result.outcome;
+        record.outcome = (record.direction === "WATCH YES") === (result.outcome === "yes")
+          ? "correct" : "incorrect";
+        record.resolvedAt = now;
+      }
+    }
+  }
+  saveSignalHistory();
+}
+
+function calculateSignalMetrics(records = loadSignalHistory().observations) {
+  const summarize = rows => {
+    const correct = rows.filter(row => row.outcome === "correct").length;
+    const incorrect = rows.filter(row => row.outcome === "incorrect").length;
+    const resolved = correct + incorrect;
+    return { total: rows.length, correct, incorrect, resolved,
+      unresolved: rows.filter(row => row.outcome === "unresolved").length,
+      invalid: rows.filter(row => row.outcome === "invalid").length,
+      accuracy: resolved ? correct / resolved : null };
+  };
+  return {
+    overall: summarize(records),
+    assets: Object.fromEntries(["BTC", "ETH", "SOL"].map(asset =>
+      [asset, summarize(records.filter(row => row.asset === asset))])),
+    directions: Object.fromEntries(["WATCH YES", "WATCH NO"].map(direction =>
+      [direction, summarize(records.filter(row => row.direction === direction))])),
+    bands: Object.fromEntries([[70, 79], [80, 89], [90, 100]].map(([low, high]) =>
+      [`${low}–${high}`, summarize(records.filter(row => row.evidenceScore >= low && row.evidenceScore <= high))]))
+  };
+}
+
+function calculateContractMetrics(records = loadSignalHistory().observations) {
+  const representatives = new Map();
+  // First directional observation in retained history wins; equal timestamps
+  // retain insertion order. Later transitions cannot change direction or band.
+  for (const record of records) {
+    if (!["WATCH YES", "WATCH NO"].includes(record.direction)) continue;
+    const first = representatives.get(record.ticker);
+    if (!first || record.timestamp < first.timestamp) representatives.set(record.ticker, record);
+  }
+  return calculateSignalMetrics([...representatives.values()].map(record => {
+    let outcome = record.outcome;
+    if (["correct", "incorrect"].includes(outcome)) {
+      outcome = ["yes", "no"].includes(record.result)
+        ? ((record.direction === "WATCH YES") === (record.result === "yes") ? "correct" : "incorrect")
+        : "invalid";
+    }
+    return { ...record, outcome };
+  }));
+}
+
+function renderSignalHistory() {
+  const history = loadSignalHistory();
+  pruneSignalHistory();
+  const metrics = calculateSignalMetrics();
+  const contracts = calculateContractMetrics();
+  const percentage = value => value === null ? "—" : `${(value * 100).toFixed(1)}%`;
+  for (const [id, value] of [["signals", contracts.overall.total], ["wins", contracts.overall.correct],
+    ["accuracy", percentage(contracts.overall.accuracy)]]) {
+    const node = document.getElementById(id);
+    if (node) node.textContent = String(value);
+  }
+  const details = document.getElementById("signalHistoryDetails");
+  if (details) {
+    const lines = [];
+    for (const [label, view] of [["Contract-level", contracts], ["Observation-level", metrics]]) {
+      lines.push(`${label}: ${percentage(view.overall.accuracy)} (${view.overall.correct}/${view.overall.resolved} resolved correct); total: ${view.overall.total}; unresolved: ${view.overall.unresolved}; invalid/unusable: ${view.overall.invalid}`);
+      for (const group of [view.assets, view.directions, view.bands]) {
+        for (const [name, data] of Object.entries(group)) {
+          lines.push(`${name}: ${percentage(data.accuracy)} (${data.correct}/${data.resolved} resolved correct)`);
+        }
+      }
+    }
+    lines.push("Recent observations:");
+    for (const record of history.observations.slice(-10).reverse()) {
+      lines.push(`${new Date(record.timestamp).toLocaleString()} · ${record.asset} ${record.ticker} · ${record.direction} · ${record.evidenceScore}/100 · ${record.outcome}`);
+    }
+    details.textContent = lines.join("\n");
+  }
+}
+
+async function resolveSignalOutcomes() {
+  if (outcomeResolutionInFlight) return;
+  const now = Date.now();
+  const history = loadSignalHistory();
+  const tickers = [...new Set(history.observations.filter(record => record.outcome === "unresolved" &&
+    (record.closeTimestamp === null || record.closeTimestamp <= now) && (record.nextCheckAt || 0) <= now
+  ).map(record => record.ticker))].slice(0, 20);
+  if (!tickers.length) return;
+  outcomeResolutionInFlight = true;
+  // Back off on transient failures; never turn a failed request into a loss.
+  applySignalOutcomes(tickers.map(ticker => ({ ticker, outcome: "unresolved" })), now);
+  try {
+    const response = await fetch(`/api/market-outcomes?${new URLSearchParams({ tickers: tickers.join(",") })}`, {
+      cache: "no-store", signal: AbortSignal.timeout(330000)
+    });
+    if (!response.ok) throw new Error(`Outcome endpoint returned ${response.status}`);
+    const data = await response.json();
+    if (!Array.isArray(data.outcomes)) throw new Error("Invalid outcome response");
+    applySignalOutcomes(data.outcomes.filter(result => result && tickers.includes(result.ticker)));
+  } catch (error) {
+    console.warn("Signal outcomes remain unresolved:", error);
+  } finally {
+    outcomeResolutionInFlight = false;
+    renderSignalHistory();
+  }
+}
+
 function renderMarkets(markets) {
   const grid = document.querySelector("#marketGrid");
   const feed = document.querySelector("#signalFeed");
@@ -322,6 +517,8 @@ function renderMarkets(markets) {
     const price = marketPrice(market);
     const previous = previousPrice(market);
     const signal = buildSignal(market);
+
+    observeSignal(market, signal);
 
     const change =
       Number.isFinite(price) && Number.isFinite(previous)
@@ -381,6 +578,8 @@ function renderMarkets(markets) {
       </div>
     `;
   }).join("");
+  saveSignalHistory();
+  renderSignalHistory();
 }
 
 function showStatus(text) {
@@ -434,6 +633,8 @@ recordMarketPrices(markets);
         </article>
       `;
     }
+  } finally {
+    void resolveSignalOutcomes();
   }
 }
 
@@ -706,6 +907,7 @@ if (clearPositionButton) {
 }
 
 renderTrackedPosition();
+renderSignalHistory();
 loadEndpoint();
 loadLiveMarkets();
 
