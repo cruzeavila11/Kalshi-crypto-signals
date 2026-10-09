@@ -206,6 +206,55 @@ async function fetchOpenMarketsForSeries(series) {
   }));
 }
 
+function selectUsableSolMarket(markets, now = Date.now()) {
+  const number = value =>
+    value === null || value === undefined || String(value).trim() === ""
+      ? NaN : Number(value);
+  const candidates = markets.map(market => {
+    const bid = number(market.yes_bid_dollars);
+    const ask = number(market.yes_ask_dollars);
+    const price = number(market.last_price_dollars ?? market.price);
+    const volume = number(market.volume_fp ?? market.volume);
+    const recentVolume = number(market.volume_24h_fp ?? market.volume_24h);
+    const interest = number(market.open_interest_fp ?? market.open_interest);
+    const minutesLeft = (new Date(
+      market.close_time || market.expected_expiration_time || market.expiration_time
+    ).getTime() - now) / 60000;
+
+    if (
+      !["active", "open"].includes(market.status) ||
+      !Number.isFinite(bid) || !Number.isFinite(ask) ||
+      bid <= 0 || ask >= 1 || ask < bid || ask - bid > 0.08 + 1e-9 ||
+      !Number.isFinite(price) || price <= 0 || price >= 1 ||
+      !Number.isFinite(volume) || volume <= 0 ||
+      !Number.isFinite(minutesLeft) || minutesLeft <= 0 || minutesLeft > 24 * 60
+    ) return null;
+
+    return {
+      market,
+      // Prefer the signal window, then other short horizons, then near expiry.
+      timeRank: minutesLeft >= 2 && minutesLeft <= 30 ? 0 :
+        minutesLeft > 30 && minutesLeft <= 180 ? 1 : minutesLeft < 2 ? 2 : 3,
+      minutesLeft,
+      spread: ask - bid,
+      recentVolume: Number.isFinite(recentVolume) && recentVolume >= 0 ? recentVolume : volume,
+      interest: Number.isFinite(interest) && interest >= 0 ? interest : 0,
+      volume
+    };
+  }).filter(Boolean);
+
+  candidates.sort((a, b) =>
+    a.timeRank - b.timeRank ||
+    b.recentVolume - a.recentVolume ||
+    a.spread - b.spread ||
+    b.interest - a.interest ||
+    b.volume - a.volume ||
+    a.minutesLeft - b.minutesLeft ||
+    String(a.market.ticker).localeCompare(String(b.market.ticker))
+  );
+  return candidates[0]?.market || null;
+}
+
 async function findBestLiveMarkets() {
   const cryptoSeries = await discoverCryptoSeries();
 
@@ -214,6 +263,9 @@ async function findBestLiveMarkets() {
   for (const asset of ["BTC", "ETH", "SOL"]) {
     const candidates = cryptoSeries
       .filter(series => series.asset === asset)
+      .sort((a, b) => asset === "SOL"
+        ? Number(b.ticker === "KXSOL15M") - Number(a.ticker === "KXSOL15M") || b.score - a.score
+        : 0)
       .slice(0, 12);
 
     let assetMarkets = [];
@@ -222,6 +274,13 @@ async function findBestLiveMarkets() {
       try {
         const markets =
           await fetchOpenMarketsForSeries(series);
+
+        if (asset === "SOL") {
+          const market = selectUsableSolMarket(markets);
+          if (!market) continue;
+          assetMarkets = [market];
+          break;
+        }
 
         if (markets.length > 0) {
       assetMarkets = markets
