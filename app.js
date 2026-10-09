@@ -2,6 +2,9 @@ const REFRESH_MS = 30000;
 const PRICE_HISTORY_KEY = "kalshiCryptoPriceHistory";
 const HISTORY_MAX_AGE_MS = 15 * 60 * 1000;
 const POSITION_KEY = "kalshiTrackedPosition";
+const POSITION_ALERT_KEY = "kalshiTrackedPositionAlert";
+let lastPositionAlertState = null;
+let positionAlertStateHydrated = false;
 let latestMarkets = [];
 function loadPosition() {
   try {
@@ -13,10 +16,71 @@ function loadPosition() {
 
 function savePosition(position) {
   localStorage.setItem(POSITION_KEY, JSON.stringify(position));
+  resetPositionAlert();
 }
 
 function clearSavedPosition() {
   localStorage.removeItem(POSITION_KEY);
+  resetPositionAlert();
+}
+
+function resetPositionAlert() {
+  lastPositionAlertState = null;
+  positionAlertStateHydrated = true;
+  try {
+    localStorage.removeItem(POSITION_ALERT_KEY);
+  } catch (error) {
+    console.warn("Unable to reset position alert state:", error);
+  }
+}
+
+function notifyPositionTransition(position, status, currentCents, pnlDollars, returnPct, reason) {
+  const positionId = JSON.stringify([
+    position.openedAt, position.asset, position.side,
+    position.entryPrice, position.contracts
+  ]);
+
+  // Hydrate once; stale persisted data must never replace newer session state.
+  if (!positionAlertStateHydrated) {
+    positionAlertStateHydrated = true;
+    try {
+      lastPositionAlertState = JSON.parse(localStorage.getItem(POSITION_ALERT_KEY) || "null");
+    } catch (error) {
+      console.warn("Unable to read position alert state:", error);
+    }
+  }
+
+  const previous = lastPositionAlertState;
+  if (previous?.positionId === positionId && previous.status === status) return;
+
+  // Record every evaluated status, including HOLD/CLOSED and denied permission.
+  // This prevents refresh duplicates while allowing a later transition back.
+  lastPositionAlertState = { positionId, status };
+  try {
+    localStorage.setItem(POSITION_ALERT_KEY, JSON.stringify(lastPositionAlertState));
+  } catch (error) {
+    console.warn("Unable to persist position alert state:", error);
+  }
+
+  if (
+    !["TAKE PROFIT", "CLOSE", "RISK EXIT"].includes(status) ||
+    typeof Notification === "undefined" ||
+    Notification.permission !== "granted"
+  ) return;
+
+  const pnlSign = pnlDollars >= 0 ? "+" : "";
+  const returnSign = returnPct >= 0 ? "+" : "";
+  try {
+    new Notification(`${position.asset} ${position.side} • ${status}`, {
+      body: `Current ${currentCents.toFixed(1)}¢ • ` +
+        `P/L ${pnlSign}$${pnlDollars.toFixed(2)} • ` +
+        `Return ${returnSign}${returnPct.toFixed(1)}%` +
+        (reason ? ` • ${reason}` : ""),
+      tag: `kalshi-position-${positionId}`
+    });
+  } catch (error) {
+    console.warn("Unable to show position notification:", error);
+  }
 }
 function loadPriceHistory() {
   try {
@@ -634,6 +698,8 @@ if (Number.isFinite(minutesLeft) && minutesLeft <= 0) {
 }
 
   const pnlSign = pnlDollars >= 0 ? "+" : "";
+
+  notifyPositionTransition(position, status, currentCents, pnlDollars, returnPct, reason);
 
   if (positionStatus) {
     positionStatus.innerHTML = `
