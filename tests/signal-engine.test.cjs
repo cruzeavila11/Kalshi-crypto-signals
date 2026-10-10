@@ -51,14 +51,20 @@ test('shared scorer and browser adapter exactly match pre-extraction scorer acro
     assert.deepEqual(scoreSignal(m, resolvePreviousPrice(m), now), original);
     const adapter = label === 'NO SIGNAL' && over.previous_price_dollars === undefined &&
       Object.hasOwn(over, 'previous_price_dollars') ? (await browser()).c : c;
-    assert.deepEqual(adapter.buildSignal(m), original);
+    if (adapter === c) {
+      const bearish = original.label === 'WATCH NO';
+      const samples = bearish ? [[.50, now - 60000], [.48, now - 30000]] : [[.50, now - 60000], [.52, now - 30000]];
+      const ready = (await browser(warmedStore(m.ticker, samples))).c;
+      assert.deepEqual(ready.buildSignal(m), original);
+    } else assert.deepEqual(adapter.buildSignal(m), original);
     assert.equal(original.label, label); assert.equal(original.strength, strength);
   }
   for (const minutes of [1, 2, 5, 15, 30]) for (const bearish of [false, true]) {
     const m = { ...market(), close_time: close(minutes), ...(bearish ?
       { last_price_dollars: '0.44', yes_bid_dollars: '0.43', yes_ask_dollars: '0.44' } : {}) };
     const original = JSON.parse(JSON.stringify(legacy.buildSignal(m)));
-    assert.deepEqual(c.buildSignal(m), original);
+    const ready = (await browser(warmedStore(m.ticker, bearish ? [[.50, now - 60000], [.48, now - 30000]] : undefined))).c;
+    assert.deepEqual(ready.buildSignal(m), original);
     assert.equal(original.label, minutes === 1 ? 'WATCH' : bearish ? 'WATCH NO' : 'WATCH YES');
     assert.equal(original.strength, minutes === 1 ? 49 : minutes === 30 ? 83 : 88);
   }
@@ -133,7 +139,7 @@ for (const asset of ['BTC', 'ETH', 'SOL']) test(`${asset}: warm-up counts, bound
       { last_price_dollars: '.44', yes_bid_dollars: '.43', yes_ask_dollars: '.44' }, 'WATCH NO'],
     ['strong one tick', [[.50, now - 30000]], { last_price_dollars: '.60' }, 'WATCH'],
     ['whipsaw', [[.50, now - 90000], [.62, now - 60000], [.58, now - 30000]],
-      { previous_price_dollars: undefined }, 'WATCH YES'],
+      { previous_price_dollars: undefined }, 'WATCH'],
     ['duplicate prior timestamps', [[.50, now - 60000], [.50, now - 60000]], {}, 'WATCH'],
     ['current timestamp is not a prior observation', [[.50, now - 60000], [.52, now]], {}, 'WATCH'],
     ['invalid current', [], { last_price_dollars: '1.5' }, 'NO SIGNAL']
@@ -148,7 +154,7 @@ for (const asset of ['BTC', 'ETH', 'SOL']) test(`${asset}: warm-up counts, bound
     const normal = exports.scoreSignal(input, c.previousPrice(input), now);
     assert.equal(signal.strength, normal.strength, name);
     if (expected === 'WATCH' && normal.label.startsWith('WATCH ')) {
-      assert.match(signal.reason, /Warming up new 15-minute contract/);
+      assert.match(signal.reason, name === 'whipsaw' ? /Recent price action/ : /Warming up new 15-minute contract/);
       assert.equal(signal.css, 'neutral');
     } else assert.deepEqual(signal, normal, name);
     assert.equal((await browser(store)).c.buildSignal(input).label, expected, `reload: ${name}`);
@@ -162,4 +168,44 @@ for (const asset of ['BTC', 'ETH', 'SOL']) test(`${asset}: warm-up counts, bound
   next.recordMarketPrices([{ ...m, last_price_dollars: '.52' }]);
   next = (await browser(store, now + 60000)).c;
   assert.equal(next.buildSignal(m).label, 'WATCH YES');
+});
+
+for (const asset of ['BTC', 'ETH', 'SOL']) test(`${asset}: recent consistency gate protects against reversals and noise without rescoring`, async () => {
+  const exports = await engine;
+  const cases = [
+    ['steady up', [.50, .52, .54, .56, .58], 'WATCH YES', 'WATCH YES'],
+    ['steady down', [.50, .48, .46, .44, .42], 'WATCH NO', 'WATCH NO'],
+    ['up baseline recent down', [.50, .62, .60, .58, .56], 'WATCH YES', 'WATCH'],
+    ['down baseline recent up', [.50, .38, .40, .42, .44], 'WATCH NO', 'WATCH'],
+    ['alternating', [.50, .58, .52, .60, .56], 'WATCH YES', 'WATCH'],
+    ['small upward trend pullback', [.50, .53, .52, .55, .56], 'WATCH YES', 'WATCH YES'],
+    ['small latest pullback', [.50, .52, .54, .56, .55], 'WATCH YES', 'WATCH YES'],
+    ['small downward trend pullback', [.50, .47, .48, .45, .44], 'WATCH NO', 'WATCH NO'],
+    ['flat recent prices', [.56, .56, .56], 'WATCH YES', 'WATCH'],
+    ['API direction conflicts with recent', [.60, .58, .56], 'WATCH YES', 'WATCH']
+  ];
+  for (const [name, prices, before, after] of cases) {
+    const ticker = `${asset}-CONSISTENT`;
+    const samples = prices.slice(0, -1).map((price, i) => [price, now - (prices.length - 1 - i) * 30000]);
+    const current = prices.at(-1);
+    const input = { ...market(ticker, asset), last_price_dollars: String(current),
+      yes_bid_dollars: String(current - .01), yes_ask_dollars: String(current) };
+    const store = warmedStore(ticker, samples);
+    const { c } = await browser(store);
+    const normal = exports.scoreSignal(input, c.previousPrice(input), now);
+    assert.equal(normal.label, before, name);
+    const actual = c.buildSignal(input);
+    assert.equal(actual.label, after, name);
+    assert.equal(actual.strength, normal.strength, name);
+    if (before === after) assert.deepEqual(actual, normal, name);
+    else { assert.equal(actual.css, 'neutral'); assert.match(actual.reason, /Recent price action/); }
+    assert.deepEqual(JSON.parse(JSON.stringify((await browser(store)).c.buildSignal(input))),
+      JSON.parse(JSON.stringify(actual)), `reload ${name}`);
+    const other = { ...input, ticker: `${asset}-OTHER` };
+    assert.equal(c.buildSignal(other).label, 'WATCH');
+    assert.match(c.buildSignal(other).reason, /Warming up/);
+  }
+  const stale = warmedStore(`${asset}-STALE`, [[.50, now - 180000], [.52, now - 150000]]);
+  const { c } = await browser(stale);
+  assert.match(c.buildSignal(market(`${asset}-STALE`, asset)).reason, /recent same-ticker history is insufficient/);
 });

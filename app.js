@@ -266,13 +266,37 @@ function buildSignal(market) {
   // Current reading is evaluated before it is stored. Count distinct prior
   // observation times so repeated evaluations at one timestamp cannot warm up.
   const priorTimes = [...new Set(entries.map(entry => entry.time).filter(time => time < now))];
-  if (priorTimes.length >= 2 && now - priorTimes[0] >= 60000) return signal;
+  if (priorTimes.length < 2 || now - priorTimes[0] < 60000) {
+    return {
+      ...signal,
+      label: "WATCH",
+      css: "neutral",
+      reason: `Warming up new 15-minute contract: need 3 same-ticker observations spanning 60 seconds. ${signal.reason}`
+    };
+  }
+
+  // Keep the latest price for each distinct prior timestamp. Never include
+  // another ticker or count the current evaluation twice.
+  const recentByTime = new Map(entries.filter(entry => entry.time < now &&
+    now - entry.time <= 120000).map(entry => [entry.time, entry.price]));
+  const prices = [...recentByTime.values()].slice(-4).concat(marketPrice(market));
+  const direction = signal.label === "WATCH YES" ? 1 : -1;
+  const moves = prices.slice(1).map((price, index) => direction * (price - prices[index]));
+  const epsilon = 1e-9;
+  const aligned = moves.filter(move => move > epsilon);
+  const opposing = moves.filter(move => move < -epsilon);
+  const support = aligned.reduce((sum, move) => sum + move, 0);
+  const opposition = opposing.reduce((sum, move) => sum - move, 0);
+  const consistent = prices.length >= 3 && support - opposition > epsilon &&
+    aligned.length * 3 >= (aligned.length + opposing.length) * 2 &&
+    support + epsilon >= opposition * 3 && moves[moves.length - 1] >= -0.01 - epsilon;
+  if (consistent) return signal;
 
   return {
     ...signal,
     label: "WATCH",
     css: "neutral",
-    reason: `Warming up new 15-minute contract: need 3 same-ticker observations spanning 60 seconds. ${signal.reason}`
+    reason: `Recent price action does not consistently support the longer baseline direction (or recent same-ticker history is insufficient). ${signal.reason}`
   };
 }
 
