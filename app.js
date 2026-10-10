@@ -6,9 +6,55 @@ const HISTORY_MAX_AGE_MS = 15 * 60 * 1000;
 const HISTORY_MAX_TICKERS = 24;
 const POSITION_KEY = "kalshiTrackedPosition";
 const POSITION_ALERT_KEY = "kalshiTrackedPositionAlert";
+const ALERTS_ENABLED_KEY = "kalshiAlertsEnabled";
+let alertsEnabled = loadAlertsEnabled();
 let lastPositionAlertState = null;
 let positionAlertStateHydrated = false;
 let latestMarkets = [];
+function loadAlertsEnabled() {
+  try {
+    return localStorage.getItem(ALERTS_ENABLED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function setAlertsEnabled(enabled) {
+  alertsEnabled = enabled;
+  try {
+    localStorage.setItem(ALERTS_ENABLED_KEY, String(enabled));
+  } catch (error) {
+    console.warn("Unable to persist alert preference:", error);
+  }
+  renderAlertControl();
+}
+
+function renderAlertControl() {
+  const button = document.querySelector("#notifyBtn");
+  if (button) {
+    button.textContent = alertsEnabled ? "Alerts ON" : "Alerts OFF";
+    button.setAttribute("aria-pressed", String(alertsEnabled));
+  }
+}
+
+async function toggleAlerts() {
+  if (alertsEnabled) {
+    setAlertsEnabled(false);
+    return;
+  }
+  if (typeof Notification === "undefined") {
+    alert("This browser does not support notifications.");
+    return;
+  }
+  try {
+    const permission = Notification.permission === "granted"
+      ? "granted" : await Notification.requestPermission();
+    setAlertsEnabled(permission === "granted");
+  } catch (error) {
+    console.warn("Unable to request notification permission:", error);
+    setAlertsEnabled(false);
+  }
+}
 function loadPosition() {
   try {
     return JSON.parse(localStorage.getItem(POSITION_KEY) || "null");
@@ -67,6 +113,7 @@ function notifyPositionTransition(position, status, currentCents, pnlDollars, re
 
   if (
     !["TAKE PROFIT", "CLOSE", "RISK EXIT"].includes(status) ||
+    !alertsEnabled ||
     typeof Notification === "undefined" ||
     Notification.permission !== "granted"
   ) return;
@@ -598,19 +645,8 @@ if (saveEndpoint) {
 const notifyButton = document.querySelector("#notifyBtn");
 
 if (notifyButton) {
-  notifyButton.onclick = async () => {
-    if (!("Notification" in window)) {
-      alert("This browser does not support notifications.");
-      return;
-    }
-
-    const permission = await Notification.requestPermission();
-
-    notifyButton.textContent =
-      permission === "granted"
-        ? "Alerts Enabled"
-        : "Alerts Not Enabled";
-  };
+  notifyButton.onclick = toggleAlerts;
+  renderAlertControl();
 }
 const savePositionButton = document.querySelector("#savePosition");
 const clearPositionButton = document.querySelector("#clearPosition");
