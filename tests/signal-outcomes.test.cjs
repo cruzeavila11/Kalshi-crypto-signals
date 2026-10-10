@@ -108,6 +108,17 @@ function backend(fetch) {
     serverSource.indexOf('app.get("/api/discover-series"')), c);
   return { c, handler };
 }
+test('rollover gaps display per-asset waiting cards without recording synthetic signals', () => {
+  const { c, nodes } = browser();
+  c.renderMarkets([market()]);
+  assert.match(nodes.get('marketGrid').innerHTML, /ETH/);
+  assert.match(nodes.get('marketGrid').innerHTML, /SOL/);
+  assert.match(nodes.get('signalFeed').innerHTML, /Waiting for the next usable 15-minute contract/);
+  const count = c.loadSignalHistory().observations.length;
+  c.renderMarkets([]);
+  for (const asset of ['BTC', 'ETH', 'SOL']) assert.match(nodes.get('signalFeed').innerHTML, new RegExp(`${asset}</b>: NO SIGNAL`));
+  assert.equal(c.loadSignalHistory().observations.length, count);
+});
 test('only explicit final binary results resolve; closed, ambiguous, conflicting and wrong identity do not guess', () => {
   const { c } = backend();
   const classify = patch => c.classifyMarketOutcome('BTC-A', { ticker: 'BTC-A', status: 'finalized', result: 'yes', ...patch }).outcome;

@@ -255,64 +255,39 @@ function selectUsableSolMarket(markets, now = Date.now()) {
   return candidates[0]?.market || null;
 }
 
+const FIFTEEN_MINUTE_SERIES = { BTC: "KXBTC15M", ETH: "KXETH15M", SOL: "KXSOL15M" };
+
+function selectFifteenMinuteMarket(markets, asset, now = Date.now()) {
+  const series = FIFTEEN_MINUTE_SERIES[asset];
+  const active = markets.filter(market => {
+    const close = new Date(market.close_time).getTime();
+    const open = market.open_time ? new Date(market.open_time).getTime() : null;
+    const rawPrice = market.last_price_dollars ?? market.price ?? market.yes_ask_dollars ?? market.yes_bid_dollars;
+    const price = rawPrice === null || rawPrice === undefined || String(rawPrice).trim() === "" ? NaN : Number(rawPrice);
+    return series && String(market.ticker).startsWith(`${series}-`) &&
+      ["active", "open"].includes(market.status) &&
+      Number.isFinite(close) && close > now &&
+      (open === null || (Number.isFinite(open) && open <= now)) &&
+      Number.isFinite(price) && price >= 0 && price <= 1;
+  });
+  if (asset === "SOL") return selectUsableSolMarket(active, now);
+  return active.sort((a, b) => new Date(a.close_time) - new Date(b.close_time))[0] || null;
+}
+
 async function findBestLiveMarkets() {
-  const cryptoSeries = await discoverCryptoSeries();
-
   const selected = [];
-
-  for (const asset of ["BTC", "ETH", "SOL"]) {
-    const candidates = cryptoSeries
-      .filter(series => series.asset === asset)
-      .sort((a, b) => asset === "SOL"
-        ? Number(b.ticker === "KXSOL15M") - Number(a.ticker === "KXSOL15M") || b.score - a.score
-        : 0)
-      .slice(0, 12);
-
-    let assetMarkets = [];
-
-    for (const series of candidates) {
-      try {
-        const markets =
-          await fetchOpenMarketsForSeries(series);
-
-        if (asset === "SOL") {
-          const market = selectUsableSolMarket(markets);
-          if (!market) continue;
-          assetMarkets = [market];
-          break;
-        }
-
-        if (markets.length > 0) {
-      assetMarkets = markets
-  .sort((a, b) => {
-    const aTime = new Date(
-      a.close_time || a.expiration_time || 0
-    ).getTime();
-
-    const bTime = new Date(
-      b.close_time || b.expiration_time || 0
-    ).getTime();
-
-    return aTime - bTime;
-  })
-  .slice(0, 1);
-          break;
-        }
-      } catch (error) {
-        console.error(
-          `Series ${series.ticker}:`,
-          error.message
-        );
-      }
+  const cryptoSeries = Object.entries(FIFTEEN_MINUTE_SERIES).map(([asset, ticker]) =>
+    ({ asset, ticker, title: `${asset} 15 minutes`, frequency: "fifteen_min" }));
+  for (const series of cryptoSeries) {
+    try {
+      const markets = await fetchOpenMarketsForSeries(series);
+      const market = selectFifteenMinuteMarket(markets, series.asset);
+      if (market) selected.push(market);
+    } catch (error) {
+      console.error(`Series ${series.ticker}:`, error.message);
     }
-
-    selected.push(...assetMarkets);
   }
-
-  return {
-    cryptoSeries,
-    markets: selected
-  };
+  return { cryptoSeries, markets: selected };
 }
 
 app.get("/api/health", (req, res) => {
@@ -329,7 +304,8 @@ app.get("/api/markets", async (req, res) => {
   try {
     if (
       marketCache.data &&
-      Date.now() - marketCache.time < CACHE_MS
+      Date.now() - marketCache.time < CACHE_MS &&
+      marketCache.data.markets.every(market => new Date(market.close_time).getTime() > Date.now())
     ) {
       return res.json(marketCache.data);
     }

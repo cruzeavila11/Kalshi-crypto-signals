@@ -414,24 +414,10 @@ function renderMarkets(markets) {
 
   if (!grid || !feed) return;
 
-  if (!Array.isArray(markets) || markets.length === 0) {
-    grid.innerHTML = `
-      <article class="card market">
-        <div class="coin">No live crypto markets found</div>
-        <div class="muted">
-          Waiting for BTC, ETH or SOL markets from the server.
-        </div>
-      </article>
-    `;
-
-    feed.innerHTML = `
-      <div class="feedItem">
-        No signals generated because no live markets were returned.
-      </div>
-    `;
-
-    return;
-  }
+  markets = Array.isArray(markets) ? markets : [];
+  const missingAssets = ["BTC", "ETH", "SOL"].filter(asset =>
+    !markets.some(market => assetName(market) === asset));
+  const waitingReason = "Waiting for the next usable 15-minute contract.";
 
   grid.innerHTML = markets.map(market => {
     const price = marketPrice(market);
@@ -485,7 +471,13 @@ function renderMarkets(markets) {
         </div>
       </article>
     `;
-  }).join("");
+  }).join("") + missingAssets.map(asset => `
+    <article class="card market">
+      <div class="coin">${asset}</div>
+      <div class="signal"><strong class="neutral">NO SIGNAL</strong></div>
+      <div class="muted">${waitingReason}</div>
+    </article>
+  `).join("");
 
   feed.innerHTML = markets.map(market => {
     const signal = buildSignal(market);
@@ -497,7 +489,9 @@ function renderMarkets(markets) {
         ${signal.reason}
       </div>
     `;
-  }).join("");
+  }).join("") + missingAssets.map(asset => `
+    <div class="feedItem"><b>${asset}</b>: NO SIGNAL — ${waitingReason}</div>
+  `).join("");
   saveSignalHistory();
   renderSignalHistory();
 }
