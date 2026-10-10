@@ -92,12 +92,21 @@ test('bounded storage, empty metrics and failed storage retain session deduplica
   assert.equal(c.loadSignalHistory().observations.length, 499);
 });
 test('real render path observes before price-history update and fills existing history UI', () => {
-  const { c, nodes } = browser();
+  const store = new Map([['kalshiCryptoTickerPriceHistoryV1', JSON.stringify({ version: 1,
+    byTicker: { 'BTC-TEST': [{ price: .50, time: now - 60000 }, { price: .52, time: now - 30000 }] }
+  })]]);
+  const { c, nodes } = browser(store);
   c.renderMarkets([market()]); c.renderMarkets([market()]);
   assert.equal(c.loadSignalHistory().observations.length, 1);
   assert.equal(c.loadSignalHistory().observations[0].evidenceScore, 88);
   assert.equal(nodes.get('signals').textContent, '1');
   assert.match(nodes.get('signalHistoryDetails').textContent, /BTC-TEST/);
+});
+test('warm-up reason renders without recording a directional outcome observation', () => {
+  const { c, nodes } = browser();
+  c.renderMarkets([market()]);
+  assert.equal(c.loadSignalHistory().observations.length, 0);
+  assert.match(nodes.get('marketGrid').innerHTML, /Warming up new 15-minute contract/);
 });
 function backend(fetch) {
   let handler;

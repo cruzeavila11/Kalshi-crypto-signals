@@ -210,7 +210,23 @@ function previousPrice(market) {
 }
 
 function buildSignal(market) {
-  return scoreSignal(market, previousPrice(market), Date.now());
+  const now = Date.now();
+  const signal = scoreSignal(market, previousPrice(market), now);
+  if (!["WATCH YES", "WATCH NO"].includes(signal.label)) return signal;
+
+  const history = loadPriceHistory();
+  const entries = Object.hasOwn(history.byTicker, market.ticker) ? history.byTicker[market.ticker] : [];
+  // Current reading is evaluated before it is stored. Count distinct prior
+  // observation times so repeated evaluations at one timestamp cannot warm up.
+  const priorTimes = [...new Set(entries.map(entry => entry.time).filter(time => time < now))];
+  if (priorTimes.length >= 2 && now - priorTimes[0] >= 60000) return signal;
+
+  return {
+    ...signal,
+    label: "WATCH",
+    css: "neutral",
+    reason: `Warming up new 15-minute contract: need 3 same-ticker observations spanning 60 seconds. ${signal.reason}`
+  };
 }
 
 const SIGNAL_HISTORY_KEY = "kalshiSignalObservationsV1";
