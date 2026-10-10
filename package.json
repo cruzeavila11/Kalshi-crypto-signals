@@ -7,6 +7,10 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "argon2": "^0.45.1",
+    "cookie": "^2.0.1",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.7.1",
+    "jose": "^6.2.12"
   }
 }

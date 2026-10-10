@@ -1,4 +1,5 @@
 import express from "express";
+import { installAuthentication } from "./auth.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -6,7 +7,7 @@ const PORT = process.env.PORT || 3000;
 const KALSHI =
   "https://external-api.kalshi.com/trade-api/v2";
 
-app.use(express.static("."));
+await installAuthentication(app, express);
 
 const CACHE_MS = 30_000;
 const SERIES_CACHE_MS = 10 * 60_000;

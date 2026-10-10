@@ -1,6 +1,12 @@
+import { installAuthLifecycle } from "./auth-client.js";
 import { scoreSignal, resolvePreviousPrice } from "./signal-engine.js";
 
 const REFRESH_MS = 30000;
+let authLifecycle = null;
+function authenticatedFetch(...args) {
+  return authLifecycle ? authLifecycle.fetch(...args) : fetch(...args);
+}
+
 const PRICE_HISTORY_KEY = "kalshiCryptoTickerPriceHistoryV1";
 const HISTORY_MAX_AGE_MS = 15 * 60 * 1000;
 const HISTORY_MAX_TICKERS = 24;
@@ -523,11 +529,12 @@ async function resolveSignalOutcomes() {
   // Back off on transient failures; never turn a failed request into a loss.
   applySignalOutcomes(tickers.map(ticker => ({ ticker, outcome: "unresolved" })), now);
   try {
-    const response = await fetch(`/api/market-outcomes?${new URLSearchParams({ tickers: tickers.join(",") })}`, {
+    const response = await authenticatedFetch(`/api/market-outcomes?${new URLSearchParams({ tickers: tickers.join(",") })}`, {
       cache: "no-store", signal: AbortSignal.timeout(330000)
     });
     if (!response.ok) throw new Error(`Outcome endpoint returned ${response.status}`);
     const data = await response.json();
+    if (authLifecycle && !authLifecycle.isActive()) return;
     if (!Array.isArray(data.outcomes)) throw new Error("Invalid outcome response");
     applySignalOutcomes(data.outcomes.filter(result => result && tickers.includes(result.ticker)));
   } catch (error) {
@@ -635,7 +642,7 @@ async function loadLiveMarkets() {
   showStatus("Loading live data…");
 
   try {
-    const response = await fetch("/api/markets", {
+    const response = await authenticatedFetch("/api/markets", {
       cache: "no-store"
     });
 
@@ -644,6 +651,7 @@ async function loadLiveMarkets() {
     }
 
     const data = await response.json();
+    if (authLifecycle && !authLifecycle.isActive()) return;
 
     const markets = Array.isArray(data)
       ? data
@@ -921,9 +929,17 @@ if (clearPositionButton) {
   };
 }
 
+let marketRefreshTimer;
 renderTrackedPosition();
+authLifecycle = installAuthLifecycle(() => {
+  clearInterval(marketRefreshTimer);
+  latestMarkets = [];
+  positionEvaluation = null;
+  opposingConfirmation = null;
+});
 renderSignalHistory();
 loadEndpoint();
-loadLiveMarkets();
-
-setInterval(loadLiveMarkets, REFRESH_MS);
+if (await authLifecycle.check()) {
+  loadLiveMarkets();
+  marketRefreshTimer = setInterval(loadLiveMarkets, REFRESH_MS);
+}
