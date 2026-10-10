@@ -11,6 +11,9 @@ let alertsEnabled = loadAlertsEnabled();
 let lastPositionAlertState = null;
 let positionAlertStateHydrated = false;
 let latestMarkets = [];
+let positionEvaluation = null;
+let positionEvaluationSequence = 0;
+let opposingConfirmation = null;
 function loadAlertsEnabled() {
   try {
     return localStorage.getItem(ALERTS_ENABLED_KEY) === "true";
@@ -64,11 +67,13 @@ function loadPosition() {
 }
 
 function savePosition(position) {
+  opposingConfirmation = null;
   localStorage.setItem(POSITION_KEY, JSON.stringify(position));
   resetPositionAlert();
 }
 
 function clearSavedPosition() {
+  opposingConfirmation = null;
   localStorage.removeItem(POSITION_KEY);
   resetPositionAlert();
 }
@@ -646,6 +651,7 @@ async function loadLiveMarkets() {
         ? data.markets
         : [];
 latestMarkets = markets;
+    evaluatePositionMarkets(markets);
     renderMarkets(markets);
 recordMarketPrices(markets);
     renderTrackedPosition();
@@ -655,6 +661,9 @@ recordMarketPrices(markets);
       showStatus("NO LIVE MARKETS");
     }
   } catch (error) {
+    positionEvaluation = null;
+    opposingConfirmation = null;
+    renderTrackedPosition();
     console.error("Live market request failed:", error);
 
     showStatus("DATA UNAVAILABLE");
@@ -714,177 +723,141 @@ const savePositionButton = document.querySelector("#savePosition");
 const clearPositionButton = document.querySelector("#clearPosition");
 const positionStatus = document.querySelector("#positionStatus");
 
-function renderTrackedPosition() {
-  const position = loadPosition();
-
-  if (!position) {
-    if (positionStatus) {
-      positionStatus.textContent =
-        "No position currently being tracked.";
-    }
-    return;
-  }
-
-  const market = latestMarkets.find(
-    (item) => assetName(item) === position.asset
-  );
-
-  if (!market) {
-    if (positionStatus) {
-      positionStatus.textContent =
-        `${position.asset} ${position.side} • Entry ${position.entryPrice}¢ • ` +
-        `${position.contracts} contracts • Waiting for live market data`;
-    }
-    return;
-  }
-
-  const yesBid = Number(market.yes_bid_dollars);
-  const yesAsk = Number(market.yes_ask_dollars);
-  const fallbackYes = marketPrice(market);
-
-  let currentDollars;
-
-  if (position.side === "YES") {
-    currentDollars =
-      Number.isFinite(yesBid)
-        ? yesBid
-        : fallbackYes;
-  } else {
-    currentDollars =
-      Number.isFinite(yesAsk)
-        ? 1 - yesAsk
-        : 1 - fallbackYes;
-  }
-
-  if (!Number.isFinite(currentDollars)) {
-    if (positionStatus) {
-      positionStatus.textContent =
-        `${position.asset} ${position.side} • Live position price unavailable`;
-    }
-    return;
-  }
-
-  currentDollars = Math.max(0, Math.min(1, currentDollars));
-
-  const currentCents = currentDollars * 100;
-  const entryCents = Number(position.entryPrice);
-  const contracts = Number(position.contracts);
-
-  const pnlCentsPerContract = currentCents - entryCents;
-  const pnlDollars =
-    (pnlCentsPerContract * contracts) / 100;
-
-  const positionValue =
-    (currentCents * contracts) / 100;
-
-  const costBasis =
-    (entryCents * contracts) / 100;
-
-  const returnPct =
-    costBasis > 0
-      ? (pnlDollars / costBasis) * 100
-      : 0;
-
-  const closeTime =
-    market.close_time ??
-    market.expiration_time ??
-    market.expected_expiration_time;
-
-  const minutesLeft = closeTime
-    ? (new Date(closeTime).getTime() - Date.now()) / 60000
-    : NaN;
-
-  const signal = buildSignal(market);
-
-  const oppositeSignal =
-    (position.side === "YES" && signal.label === "WATCH NO") ||
-    (position.side === "NO" && signal.label === "WATCH YES");
-
-  const nearExpiry =
-  Number.isFinite(minutesLeft) && minutesLeft <= 5;
-
-const veryNearExpiry =
-  Number.isFinite(minutesLeft) && minutesLeft <= 2;
-
-const strongProfit = returnPct >= 50;
-const goodProfit = returnPct >= 25;
-const seriousLoss = returnPct <= -25;
-const moderateLoss = returnPct <= -15;
-
-const nearMaxValue = currentCents >= 90;
-
-let status = "HOLD";
-let reason =
-  "Position remains within the current risk and profit conditions.";
-
-if (Number.isFinite(minutesLeft) && minutesLeft <= 0) {
-  status = "CLOSED";
-  reason = "The tracked market has reached its closing time.";
-
-} else if (seriousLoss) {
-  status = "RISK EXIT";
-  reason =
-    "Loss has crossed the maximum current risk threshold.";
-
-} else if (oppositeSignal && moderateLoss) {
-  status = "RISK EXIT";
-  reason =
-    "The position is losing value and the live signal has reversed.";
-
-} else if (oppositeSignal) {
-  status = "CLOSE";
-  reason =
-    "The live signal has reversed against the tracked position.";
-
-} else if (strongProfit) {
-  status = "TAKE PROFIT";
-  reason =
-    "A large unrealized gain has developed.";
-
-} else if (nearMaxValue && goodProfit) {
-  status = "TAKE PROFIT";
-  reason =
-    "The contract is near its maximum value with a meaningful gain.";
-
-} else if (veryNearExpiry && returnPct > 0) {
-  status = "TAKE PROFIT";
-  reason =
-    "Very little time remains and the position is currently profitable.";
-
-} else if (nearExpiry && goodProfit) {
-  status = "TAKE PROFIT";
-  reason =
-    "The position has a meaningful gain with limited time remaining.";
-
-} else {
-  status = "HOLD";
-  reason =
-    "No exit condition currently outweighs the case for holding.";
+function positionNumber(value) {
+  if (value === null || value === undefined || typeof value === "boolean" ||
+      typeof value === "object" || String(value).trim() === "") return NaN;
+  return Number(value);
 }
 
-  const pnlSign = pnlDollars >= 0 ? "+" : "";
+function validTrackedPosition(position) {
+  return position && ["BTC", "ETH", "SOL"].includes(position.asset) &&
+    ["YES", "NO"].includes(position.side) &&
+    typeof position.ticker === "string" && /^[A-Za-z0-9_.-]{1,128}$/.test(position.ticker) &&
+    Number.isFinite(positionNumber(position.entryPrice)) &&
+    positionNumber(position.entryPrice) > 0 && positionNumber(position.entryPrice) < 100 &&
+    Number.isSafeInteger(positionNumber(position.contracts)) && positionNumber(position.contracts) > 0 &&
+    Number.isSafeInteger(positionNumber(position.openedAt)) && positionNumber(position.openedAt) > 0;
+}
 
-  notifyPositionTransition(position, status, currentCents, pnlDollars, returnPct, reason);
+function executablePositionPrice(market, side) {
+  const bid = positionNumber(market.yes_bid_dollars);
+  const ask = positionNumber(market.yes_ask_dollars);
+  if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid < 0 || ask > 1 ||
+      ask < bid) return NaN;
+  const price = side === "YES" ? bid : 1 - ask;
+  return price > 0 && price <= 1 ? price : NaN;
+}
 
+// One evaluation per successful market response, before price history changes.
+// Rendering/saving a position cannot manufacture additional evaluations.
+function evaluatePositionMarkets(markets, now = Date.now()) {
+  positionEvaluation = { id: ++positionEvaluationSequence, time: now,
+    signals: new Map(markets.map(market => [market.ticker, buildSignal(market)])) };
+}
+
+function positionGuidance(position, market, signal, evaluation, now = Date.now()) {
+  const unavailable = reason => {
+    opposingConfirmation = null;
+    return { status: "UNAVAILABLE", reason };
+  };
+  if (!position?.ticker) return unavailable("Legacy position has no ticker. Clear and re-save it against the correct contract; identity cannot be inferred.");
+  if (!validTrackedPosition(position) || positionNumber(position.openedAt) > now) {
+    return unavailable("Invalid tracked position inputs. Clear and re-save the position.");
+  }
+  const savedClose = positionNumber(position.closeTimestamp);
+  if (!market) {
+    if (Number.isFinite(savedClose) && savedClose <= now) {
+      opposingConfirmation = null;
+      return { status: "EXPIRED", reason: "Tracked contract expired; awaiting verified settlement. No new contract is substituted." };
+    }
+    return unavailable("Exact tracked ticker is unavailable. No other contract is substituted.");
+  }
+  if (market.ticker !== position.ticker || assetName(market) !== position.asset ||
+      (market.asset && market.asset !== position.asset)) {
+    return unavailable("Market identity does not match the tracked ticker and asset.");
+  }
+  const close = market.close_time ?? market.expiration_time ?? market.expected_expiration_time;
+  const closeTimestamp = close ? new Date(close).getTime() : NaN;
+  if (!Number.isFinite(closeTimestamp)) return unavailable("Valid contract expiry is unavailable.");
+  if (closeTimestamp <= now || (market.status && !["open", "active"].includes(market.status))) {
+    opposingConfirmation = null;
+    return { status: "EXPIRED", reason: "Tracked contract is expired or inactive; awaiting verified settlement. This does not mean the position was manually closed." };
+  }
+  if (!evaluation || !Number.isFinite(evaluation.time) || !Number.isInteger(evaluation.id) ||
+      evaluation.id <= 0 || evaluation.time > now || now - evaluation.time > REFRESH_MS * 2) {
+    return unavailable("Fresh live evaluation unavailable; waiting for the next successful refresh.");
+  }
+  const current = executablePositionPrice(market, position.side);
+  if (!Number.isFinite(current)) return unavailable("Valid executable bid/ask data unavailable. Last-price estimates are not used for exit guidance.");
+  const currentCents = current * 100;
+  const contracts = positionNumber(position.contracts);
+  const entry = positionNumber(position.entryPrice);
+  const pnlDollars = (currentCents - entry) * contracts / 100;
+  // Remove binary floating-point noise at the unchanged percentage boundaries.
+  const returnPct = Number(((currentCents - entry) / entry * 100).toFixed(10));
+  const minutesLeft = (closeTimestamp - now) / 60000;
+  const score = positionNumber(signal?.strength);
+  const directional = signal && ["WATCH YES", "WATCH NO"].includes(signal.label) &&
+    Number.isFinite(score) && score >= 0 && score <= 100;
+  const opposite = directional && ((position.side === "YES" && signal.label === "WATCH NO") ||
+    (position.side === "NO" && signal.label === "WATCH YES"));
+  const strongOpposite = opposite && score >= 80;
+  const identity = JSON.stringify([position.ticker, position.openedAt, position.asset,
+    position.side, position.entryPrice, position.contracts]);
+  if (!strongOpposite) opposingConfirmation = null;
+  else if (!opposingConfirmation || opposingConfirmation.identity !== identity) {
+    opposingConfirmation = { identity, lastTime: Math.max(evaluation.time, positionNumber(position.openedAt)), lastId: evaluation.id, confirmed: false };
+  } else if (opposingConfirmation.lastId !== evaluation.id) {
+    // Same snapshot/render is ignored; qualifying later refresh confirms at 30s.
+    opposingConfirmation.confirmed ||= evaluation.time - opposingConfirmation.lastTime >= 30000;
+    opposingConfirmation.lastTime = evaluation.time;
+    opposingConfirmation.lastId = evaluation.id;
+  }
+  const confirmed = strongOpposite && opposingConfirmation?.confirmed === true;
+  const relation = !signal || signal.label === "NO SIGNAL" || !Number.isFinite(score)
+    ? "missing signal" : opposite ? (strongOpposite ? "opposing signal" : "weak opposing signal")
+    : directional ? "supporting signal" : "neutral signal";
+  let status = "HOLD";
+  let rule = "No exit rule met";
+  if (returnPct <= -25) { status = "RISK EXIT"; rule = "Return at or below -25%"; }
+  else if (returnPct <= -15 && (minutesLeft <= 2 || confirmed)) {
+    status = "RISK EXIT"; rule = minutesLeft <= 2 ? "Moderate loss with at most 2 minutes remaining" : "Moderate loss with confirmed opposition";
+  } else if (returnPct > 0 && (returnPct >= 50 || currentCents >= 90 ||
+      minutesLeft <= 2 || (minutesLeft <= 5 && returnPct >= 25))) {
+    status = "TAKE PROFIT";
+    rule = returnPct >= 50 ? "Return at or above +50%" : currentCents >= 90 ? "Profitable contract value at or above 90¢"
+      : minutesLeft <= 2 ? "Positive return with at most 2 minutes remaining" : "At least +25% return with at most 5 minutes remaining";
+  } else if (confirmed) {
+    status = returnPct > 0 ? "TAKE PROFIT" : "CLOSE";
+    rule = "Confirmed opposing evidence at least 80 across evaluations spanning 30 seconds";
+  }
+  const confirmation = strongOpposite ? (confirmed ? "confirmed" : "unconfirmed; waiting for a later evaluation") : "cleared/not applicable";
+  return { status, currentCents, pnlDollars, returnPct, positionValue: current * contracts,
+    reason: `${rule}. Gross P/L ${pnlDollars >= 0 ? "+" : ""}$${pnlDollars.toFixed(2)}; return ${returnPct.toFixed(1)}%; ${minutesLeft.toFixed(1)}m remaining; ${relation}${signal?.label ? ` (${signal.label})` : ""}; evidence ${Number.isFinite(score) ? `${score}/100 (not a probability)` : "unavailable"}; opposition ${confirmation}. Manual guidance; fees excluded.` };
+}
+
+function renderTrackedPosition() {
+  const position = loadPosition();
+  if (!position) {
+    opposingConfirmation = null;
+    if (positionStatus) positionStatus.textContent = "No position currently being tracked.";
+    return;
+  }
+  const market = latestMarkets.find(item => item.ticker === position.ticker);
+  const guidance = positionGuidance(position, market,
+    positionEvaluation?.signals.get(position.ticker), positionEvaluation);
+  if (["UNAVAILABLE", "EXPIRED"].includes(guidance.status)) {
+    if (positionStatus) positionStatus.textContent = `${guidance.status === "EXPIRED" ? "Expired" : "Guidance unavailable"} — ${guidance.reason}`;
+    return;
+  }
+  notifyPositionTransition(position, guidance.status, guidance.currentCents,
+    guidance.pnlDollars, guidance.returnPct, guidance.reason);
   if (positionStatus) {
-    positionStatus.innerHTML = `
-      <div class="feedItem">
-        <b>${position.asset} ${position.side}</b> •
-        Entry ${entryCents.toFixed(0)}¢ •
-        Current ${currentCents.toFixed(1)}¢ •
-        ${contracts} contracts
-      </div>
-
-      <div class="feedItem">
-        Value $${positionValue.toFixed(2)} •
-        P/L ${pnlSign}$${pnlDollars.toFixed(2)} •
-        Return ${pnlSign}${returnPct.toFixed(1)}%
-      </div>
-
-      <div class="feedItem">
-        <b>${status}</b> — ${reason}
-      </div>
-    `;
+    // Position identity and reasons are text, not interpolated HTML.
+    positionStatus.textContent = `${position.asset} ${position.side} • ${position.ticker} • ` +
+      `Entry ${Number(position.entryPrice).toFixed(1)}¢ • Current ${guidance.currentCents.toFixed(1)}¢ • ` +
+      `${position.contracts} contracts • Value $${guidance.positionValue.toFixed(2)} • ` +
+      `${guidance.status} — ${guidance.reason}`;
   }
 }
 
@@ -901,14 +874,28 @@ if (savePositionButton) {
       !Number.isFinite(entryPrice) ||
       entryPrice <= 0 ||
       entryPrice >= 100 ||
-      !Number.isFinite(contracts) ||
+      !Number.isSafeInteger(contracts) ||
       contracts <= 0
     ) {
       alert("Please enter a valid asset, side, entry price, and contract count.");
       return;
     }
 
+    const market = latestMarkets.find(item => assetName(item) === asset);
+    const close = market?.close_time ?? market?.expiration_time ?? market?.expected_expiration_time;
+    const closeTimestamp = close ? new Date(close).getTime() : NaN;
+    if (!market || typeof market.ticker !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test(market.ticker) ||
+        (market.asset && market.asset !== asset) ||
+        !Number.isFinite(closeTimestamp) || closeTimestamp <= Date.now() ||
+        (market.status && !["open", "active"].includes(market.status)) ||
+        !Number.isFinite(executablePositionPrice(market, side)) || !positionEvaluation ||
+        Date.now() - positionEvaluation.time > REFRESH_MS * 2) {
+      alert("Cannot save: a fresh active exact contract with executable quotes is required.");
+      return;
+    }
     savePosition({
+      ticker: market.ticker,
+      closeTimestamp,
       asset,
       side,
       entryPrice,
