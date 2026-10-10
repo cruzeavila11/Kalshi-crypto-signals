@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 const appSource = fs.readFileSync(path.join(__dirname, '../app.js'), 'utf8');
 const serverSource = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
+const signalSource = fs.readFileSync(path.join(__dirname, '../signal-engine.js'), 'utf8');
 const now = Date.now();
 class FixedDate extends Date { static now() { return now; } }
 function browser(store = new Map()) {
@@ -16,7 +17,9 @@ function browser(store = new Map()) {
     localStorage: { getItem: k => store.get(k) ?? null, setItem: (k, v) => store.set(k, v), removeItem: k => store.delete(k) }
   };
   vm.createContext(c);
-  vm.runInContext(appSource.slice(0, appSource.lastIndexOf('\nrenderTrackedPosition();')), c);
+  vm.runInContext(signalSource.replace(/^export /gm, ''), c);
+  vm.runInContext(appSource.slice(0, appSource.lastIndexOf('\nrenderTrackedPosition();'))
+    .replace(/^import .*;\n/gm, ''), c);
   return { c, nodes, store };
 }
 function market(ticker = 'BTC-TEST', asset = 'BTC') {
