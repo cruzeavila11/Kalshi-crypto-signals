@@ -301,6 +301,8 @@ function buildSignal(market) {
 }
 
 const SIGNAL_HISTORY_KEY = "kalshiSignalObservationsV1";
+// Bump when signal policy changes, including adapter eligibility gates.
+const SIGNAL_MODEL_VERSION = "crypto-15m-warmup60-consistency-v1";
 const SIGNAL_HISTORY_LIMIT = 500;
 const SIGNAL_HISTORY_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const OUTCOME_RETRY_MS = 5 * 60 * 1000;
@@ -319,6 +321,10 @@ function loadSignalHistory() {
   }
   signalHistory ||= { version: 1, observations: [], states: [] };
   pruneSignalHistory();
+  signalHistory.modelBenchmarks ||= {};
+  signalHistory.modelBenchmarks[SIGNAL_MODEL_VERSION] ||= {
+    startedAt: Date.now(), initialTickers: {}
+  };
   return signalHistory;
 }
 
@@ -350,10 +356,27 @@ function observeSignal(market, signal, now = Date.now()) {
   const history = loadSignalHistory();
   const ticker = market.ticker;
   if (typeof ticker !== "string" || !/^[A-Za-z0-9_.-]{1,128}$/.test(ticker)) return;
-  const previous = history.states.find(state => state.ticker === ticker);
+  const asset = assetName(market);
+  const benchmark = history.modelBenchmarks[SIGNAL_MODEL_VERSION];
+  if (["BTC", "ETH", "SOL"].includes(asset) && !Object.hasOwn(benchmark.initialTickers, asset)) {
+    benchmark.initialTickers[asset] = ticker;
+  }
+  // Initial contracts and tickers already observed by another policy are not
+  // clean benchmark contracts. Do not modify or relabel their older records.
+  const olderTicker = history.observations.some(record => record.ticker === ticker &&
+    record.modelVersion !== SIGNAL_MODEL_VERSION) || history.states.some(state =>
+    state.ticker === ticker && state.modelVersion !== SIGNAL_MODEL_VERSION);
+  const priorObservation = history.observations.find(record => record.ticker === ticker &&
+    record.modelVersion === SIGNAL_MODEL_VERSION);
+  const previous = history.states.find(state => state.ticker === ticker &&
+    state.modelVersion === SIGNAL_MODEL_VERSION);
+  const priorEligibility = priorObservation || previous;
+  const benchmarkEligible = priorEligibility ? priorEligibility.benchmarkEligible === true :
+    ["BTC", "ETH", "SOL"].includes(asset) && benchmark.initialTickers[asset] !== ticker && !olderTicker;
   const changed = previous?.label !== signal.label;
-  history.states = history.states.filter(state => state.ticker !== ticker);
-  history.states.push({ ticker, label: signal.label, timestamp: now });
+  history.states = history.states.filter(state => state.ticker !== ticker ||
+    state.modelVersion !== SIGNAL_MODEL_VERSION);
+  history.states.push({ modelVersion: SIGNAL_MODEL_VERSION, benchmarkEligible, ticker, label: signal.label, timestamp: now });
   if (!changed || !["WATCH YES", "WATCH NO"].includes(signal.label)) return;
 
   const numeric = value => value === null || value === undefined || String(value).trim() === "" ||
@@ -363,7 +386,8 @@ function observeSignal(market, signal, now = Date.now()) {
   const closeTime = market.close_time ?? market.expiration_time ?? market.expected_expiration_time;
   const closeTimestamp = closeTime ? new Date(closeTime).getTime() : NaN;
   history.observations.push({
-    asset: assetName(market), ticker, direction: signal.label,
+    modelVersion: SIGNAL_MODEL_VERSION, benchmarkEligible,
+    asset, ticker, direction: signal.label,
     evidenceScore: signal.strength, price: numeric(marketPrice(market)),
     yesBid: bid, yesAsk: ask,
     volume: numeric(market.volume_fp ?? market.volume),
@@ -397,7 +421,15 @@ function applySignalOutcomes(outcomes, now = Date.now()) {
   saveSignalHistory();
 }
 
-function calculateSignalMetrics(records = loadSignalHistory().observations) {
+function filterSignalRecords(records, { modelVersion, benchmarkOnly = false } = {}) {
+  return records.filter(record =>
+    (modelVersion === undefined || (modelVersion === null
+      ? !record.modelVersion : record.modelVersion === modelVersion)) &&
+    (!benchmarkOnly || record.benchmarkEligible === true));
+}
+
+function calculateSignalMetrics(records = loadSignalHistory().observations, options = {}) {
+  records = filterSignalRecords(records, options);
   const summarize = rows => {
     const correct = rows.filter(row => row.outcome === "correct").length;
     const incorrect = rows.filter(row => row.outcome === "incorrect").length;
@@ -418,7 +450,8 @@ function calculateSignalMetrics(records = loadSignalHistory().observations) {
   };
 }
 
-function calculateContractMetrics(records = loadSignalHistory().observations) {
+function calculateContractMetrics(records = loadSignalHistory().observations, options = {}) {
+  records = filterSignalRecords(records, options);
   const representatives = new Map();
   // First directional observation in retained history wins; equal timestamps
   // retain insertion order. Later transitions cannot change direction or band.
@@ -441,8 +474,9 @@ function calculateContractMetrics(records = loadSignalHistory().observations) {
 function renderSignalHistory() {
   const history = loadSignalHistory();
   pruneSignalHistory();
-  const metrics = calculateSignalMetrics();
-  const contracts = calculateContractMetrics();
+  const current = { modelVersion: SIGNAL_MODEL_VERSION, benchmarkOnly: true };
+  const metrics = calculateSignalMetrics(history.observations, current);
+  const contracts = calculateContractMetrics(history.observations, current);
   const percentage = value => value === null ? "—" : `${(value * 100).toFixed(1)}%`;
   for (const [id, value] of [["signals", contracts.overall.total], ["wins", contracts.overall.correct],
     ["accuracy", percentage(contracts.overall.accuracy)]]) {
@@ -451,8 +485,12 @@ function renderSignalHistory() {
   }
   const details = document.getElementById("signalHistoryDetails");
   if (details) {
-    const lines = [];
-    for (const [label, view] of [["Contract-level", contracts], ["Observation-level", metrics]]) {
+    const lines = [`Current benchmark: ${SIGNAL_MODEL_VERSION}. First observed contract per asset excluded; later new tickers only.`];
+    for (const [label, view] of [["Current benchmark contract-level", contracts], ["Current benchmark observation-level", metrics],
+      ["Current version all contract-level", calculateContractMetrics(history.observations, { modelVersion: SIGNAL_MODEL_VERSION })],
+      ["Current version all observation-level", calculateSignalMetrics(history.observations, { modelVersion: SIGNAL_MODEL_VERSION })],
+      ["Legacy/unversioned contract-level", calculateContractMetrics(history.observations, { modelVersion: null })],
+      ["Legacy/unversioned observation-level", calculateSignalMetrics(history.observations, { modelVersion: null })]]) {
       lines.push(`${label}: ${percentage(view.overall.accuracy)} (${view.overall.correct}/${view.overall.resolved} resolved correct); total: ${view.overall.total}; unresolved: ${view.overall.unresolved}; invalid/unusable: ${view.overall.invalid}`);
       for (const group of [view.assets, view.directions, view.bands]) {
         for (const [name, data] of Object.entries(group)) {
@@ -462,7 +500,7 @@ function renderSignalHistory() {
     }
     lines.push("Recent observations:");
     for (const record of history.observations.slice(-10).reverse()) {
-      lines.push(`${new Date(record.timestamp).toLocaleString()} · ${record.asset} ${record.ticker} · ${record.direction} · ${record.evidenceScore}/100 · ${record.outcome}`);
+      lines.push(`${new Date(record.timestamp).toLocaleString()} · ${record.asset} ${record.ticker} · ${record.direction} · ${record.evidenceScore}/100 · ${record.outcome} · ${record.modelVersion || "legacy/unversioned"}${record.benchmarkEligible === true ? " · benchmark" : ""}`);
     }
     details.textContent = lines.join("\n");
   }

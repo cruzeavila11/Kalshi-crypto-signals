@@ -99,7 +99,7 @@ test('real render path observes before price-history update and fills existing h
   c.renderMarkets([market()]); c.renderMarkets([market()]);
   assert.equal(c.loadSignalHistory().observations.length, 1);
   assert.equal(c.loadSignalHistory().observations[0].evidenceScore, 88);
-  assert.equal(nodes.get('signals').textContent, '1');
+  assert.equal(nodes.get('signals').textContent, '0'); // Initial ticker is outside the clean benchmark.
   assert.match(nodes.get('signalHistoryDetails').textContent, /BTC-TEST/);
 });
 test('warm-up reason renders without recording a directional outcome observation', () => {
@@ -206,9 +206,9 @@ test('contract accuracy counts first directional observation once despite reentr
   assert.equal(contracts.bands['90–100'].accuracy, 1);
   assert.equal(JSON.stringify(c.loadSignalHistory().observations), before);
   c.renderSignalHistory();
-  assert.equal(nodes.get('signals').textContent, '6');
-  assert.equal(nodes.get('accuracy').textContent, '75.0%');
-  assert.match(nodes.get('signalHistoryDetails').textContent, /Observation-level: 66.7%/);
+  assert.equal(nodes.get('signals').textContent, '3');
+  assert.equal(nodes.get('accuracy').textContent, '100.0%');
+  assert.match(nodes.get('signalHistoryDetails').textContent, /Current version all observation-level: 66.7%/);
 });
 
 test('representative uses earliest timestamp, stable ties, exact ticker and explicit result without mutation', () => {
@@ -228,4 +228,124 @@ test('representative uses earliest timestamp, stable ties, exact ticker and expl
   rows[1].result = null;
   assert.equal(c.calculateContractMetrics(rows).overall.invalid, 1);
   assert.equal(c.calculateContractMetrics(rows).overall.resolved, 1);
+});
+
+const modelVersion = 'crypto-15m-warmup60-consistency-v1';
+test('new observations and states carry policy version; legacy and older states cannot suppress them', () => {
+  const legacy = { asset: 'BTC', ticker: 'BTC-A', direction: 'WATCH YES', evidenceScore: 75,
+    timestamp: now - 1000, outcome: 'correct', result: 'yes', custom: 'preserve me' };
+  const older = { ...legacy, ticker: 'ETH-A', asset: 'ETH', modelVersion: 'old-policy' };
+  const original = JSON.stringify([legacy, older]);
+  const store = new Map([['kalshiSignalObservationsV1', JSON.stringify({ version: 1,
+    observations: [legacy, older], states: [
+      { ticker: 'BTC-A', label: 'WATCH YES', timestamp: now - 1000 },
+      { ticker: 'ETH-A', label: 'WATCH YES', timestamp: now - 1000, modelVersion: 'old-policy' }
+    ] })]]);
+  let { c } = browser(store);
+  for (const [ticker, asset] of [['BTC-A', 'BTC'], ['ETH-A', 'ETH'], ['SOL-A', 'SOL']]) {
+    record(c, ticker, asset, 'WATCH YES', 88);
+    record(c, ticker, asset, 'WATCH YES', 90);
+  }
+  let history = c.loadSignalHistory();
+  assert.equal(history.observations.length, 5);
+  assert.equal(JSON.stringify(history.observations.slice(0, 2)), original);
+  for (const row of history.observations.slice(2)) {
+    assert.equal(row.modelVersion, modelVersion); assert.equal(row.benchmarkEligible, false);
+  }
+  assert.equal(history.states.filter(state => state.modelVersion === modelVersion).length, 3);
+  c.saveSignalHistory(); c = browser(store).c;
+  record(c, 'BTC-A', 'BTC', 'WATCH YES', 95);
+  assert.equal(c.loadSignalHistory().observations.length, 5);
+  record(c, 'BTC-A', 'BTC', 'WATCH', 49); record(c, 'BTC-A', 'BTC', 'WATCH YES', 95);
+  assert.equal(c.loadSignalHistory().observations.length, 6);
+  assert.equal(JSON.stringify(c.loadSignalHistory().observations.slice(0, 2)), original);
+});
+
+test('version filtering precedes contract grouping and applies to every metric without mutation', () => {
+  const { c } = browser();
+  const row = (ticker, asset, direction, evidenceScore, outcome, result, timestamp, version) => ({
+    ticker, asset, direction, evidenceScore, outcome, result, timestamp,
+    ...(version ? { modelVersion: version, benchmarkEligible: true } : {})
+  });
+  const rows = [
+    row('BTC-A', 'BTC', 'WATCH YES', 75, 'incorrect', 'no', 1),
+    row('BTC-A', 'BTC', 'WATCH NO', 95, 'correct', 'no', 2, modelVersion),
+    row('BTC-A', 'BTC', 'WATCH YES', 85, 'incorrect', 'no', 3, modelVersion),
+    row('ETH-A', 'ETH', 'WATCH YES', 75, 'incorrect', 'no', 4, modelVersion),
+    row('SOL-A', 'SOL', 'WATCH YES', 85, 'correct', 'yes', 5, modelVersion),
+    row('SOL-B', 'SOL', 'WATCH NO', 95, 'unresolved', null, 6, modelVersion),
+    row('ETH-B', 'ETH', 'WATCH YES', 75, 'invalid', null, 7, modelVersion),
+    row('BTC-OLD', 'BTC', 'WATCH YES', 95, 'correct', 'yes', 8, 'old-policy')
+  ];
+  const original = JSON.stringify(rows);
+  const options = { modelVersion, benchmarkOnly: true };
+  const observations = c.calculateSignalMetrics(rows, options);
+  const contracts = c.calculateContractMetrics(rows, options);
+  assert.equal(observations.overall.total, 6); assert.equal(observations.overall.accuracy, .5);
+  assert.equal(contracts.overall.total, 5); assert.equal(contracts.overall.accuracy, 2 / 3);
+  assert.equal(contracts.overall.resolved, 3); assert.equal(contracts.overall.unresolved, 1);
+  assert.equal(contracts.overall.invalid, 1);
+  assert.equal(observations.assets.BTC.total, 2); assert.equal(observations.assets.BTC.accuracy, .5);
+  assert.equal(contracts.assets.BTC.total, 1); assert.equal(contracts.assets.BTC.accuracy, 1);
+  assert.equal(contracts.assets.ETH.accuracy, 0); assert.equal(contracts.assets.SOL.accuracy, 1);
+  assert.equal(contracts.directions['WATCH YES'].accuracy, .5);
+  assert.equal(contracts.directions['WATCH NO'].accuracy, 1);
+  assert.equal(observations.directions['WATCH YES'].accuracy, 1 / 3);
+  assert.equal(contracts.bands['70–79'].accuracy, 0);
+  assert.equal(contracts.bands['80–89'].accuracy, 1);
+  assert.equal(contracts.bands['90–100'].accuracy, 1);
+  assert.equal(observations.bands['80–89'].accuracy, .5);
+  assert.equal(c.calculateContractMetrics(rows, { modelVersion: null }).overall.accuracy, 0);
+  assert.equal(c.calculateSignalMetrics(rows, { modelVersion: 'old-policy' }).overall.total, 1);
+  assert.equal(c.calculateSignalMetrics(rows, { modelVersion: 'missing' }).overall.accuracy, null);
+  assert.equal(c.calculateSignalMetrics(rows).overall.total, 8);
+  assert.equal(JSON.stringify(rows), original);
+});
+
+test('benchmark excludes initial/older tickers and persists eligibility across reload for BTC ETH SOL', () => {
+  const { c, store, nodes } = browser();
+  for (const asset of ['BTC', 'ETH', 'SOL']) record(c, `${asset}-INITIAL`, asset, 'WATCH YES', 88);
+  c.saveSignalHistory();
+  const reloaded = browser(store).c;
+  for (const asset of ['BTC', 'ETH', 'SOL']) {
+    record(reloaded, `${asset}-INITIAL`, asset, 'WATCH NO', 88);
+    record(reloaded, `${asset}-NEXT`, asset, 'WATCH', 49);
+    record(reloaded, `${asset}-NEXT`, asset, 'WATCH YES', 88);
+    reloaded.applySignalOutcomes([{ ticker: `${asset}-NEXT`, outcome: 'yes' }]);
+  }
+  const options = { modelVersion, benchmarkOnly: true };
+  const history = reloaded.loadSignalHistory();
+  assert.equal(reloaded.calculateContractMetrics(history.observations, options).overall.total, 3);
+  assert.equal(reloaded.calculateContractMetrics(history.observations, options).overall.accuracy, 1);
+  assert.equal(history.modelBenchmarks[modelVersion].initialTickers.BTC, 'BTC-INITIAL');
+  const oldTicker = { ...history.observations[0], ticker: 'BTC-SEEN-BEFORE' };
+  delete oldTicker.modelVersion; delete oldTicker.benchmarkEligible;
+  history.observations.push(oldTicker);
+  record(reloaded, 'BTC-SEEN-BEFORE', 'BTC', 'WATCH YES', 88);
+  assert.equal(history.observations.at(-1).benchmarkEligible, false);
+  reloaded.saveSignalHistory();
+  const again = browser(store);
+  again.c.renderSignalHistory();
+  assert.equal(again.nodes.get('signals').textContent, '3');
+  assert.equal(again.nodes.get('accuracy').textContent, '100.0%');
+  assert.match(again.nodes.get('signalHistoryDetails').textContent, /Legacy\/unversioned/);
+  assert.match(again.nodes.get('signalHistoryDetails').textContent, /Current benchmark/);
+  assert.equal(again.c.calculateContractMetrics(again.c.loadSignalHistory().observations, options).overall.total, 3);
+});
+
+test('non-directional first sightings establish persistent benchmark exclusions without synthetic observations', () => {
+  const { c, store } = browser();
+  record(c, 'BTC-INITIAL', 'BTC', 'WATCH', 49);
+  assert.equal(c.loadSignalHistory().observations.length, 0);
+  c.saveSignalHistory();
+  const again = browser(store).c;
+  record(again, 'BTC-INITIAL', 'BTC', 'WATCH YES', 88);
+  assert.equal(again.loadSignalHistory().observations[0].benchmarkEligible, false);
+  record(again, 'BTC-NEXT', 'BTC', 'WATCH', 49);
+  again.saveSignalHistory();
+  const next = browser(store).c;
+  record(next, 'BTC-NEXT', 'BTC', 'WATCH YES', 88);
+  assert.equal(next.loadSignalHistory().observations.at(-1).benchmarkEligible, true);
+  assert.equal(next.calculateSignalMetrics(next.loadSignalHistory().observations,
+    { modelVersion, benchmarkOnly: true }).overall.total, 1);
 });
